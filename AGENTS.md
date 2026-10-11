@@ -58,6 +58,12 @@
 
 ## Repository development rules
 
+- Support Python 3.12 and manage dependencies with uv using a committed lockfile.
+- Use `rag_assistant` as the application package and psycopg 3 as the PostgreSQL driver.
+- Run PostgreSQL with pgvector in Docker Compose for local development and run the API on the host.
+- Construct FastAPI through an application factory while exposing a module-level ASGI application.
+- Emit structured JSON logs and propagate safe, bounded `X-Request-ID` values using request-local context.
+- Expose unversioned liveness and database-backed readiness endpoints.
 - Keep application boundaries small and cohesive; use async I/O end to end for database and external-service calls.
 - Use typed configuration sourced from environment variables. Never commit secrets or credentials.
 - Make schema changes with reviewed migrations; do not rely on runtime table creation in production.
