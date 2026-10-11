@@ -79,16 +79,12 @@ async def get_current_user(
         raise _unauthorized("Not authenticated") from exc
 
 
-CurrentUser = Annotated[User, Depends(get_current_user)]
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
-
-
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(
     credentials: Credentials,
     request: Request,
     response: Response,
-    session: DbSession,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> UserResponse:
     try:
@@ -114,7 +110,7 @@ async def login(
     credentials: Credentials,
     request: Request,
     response: Response,
-    session: DbSession,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> UserResponse:
     try:
@@ -134,7 +130,7 @@ async def login(
 @router.post("/refresh", status_code=status.HTTP_204_NO_CONTENT)
 async def refresh(
     request: Request,
-    session: DbSession,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> Response:
     raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
@@ -169,7 +165,7 @@ async def refresh(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     request: Request,
-    session: DbSession,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> Response:
     raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
@@ -193,7 +189,10 @@ async def logout(
 
 
 @router.get("/me", response_model=UserResponse)
-async def me(user: CurrentUser, response: Response) -> UserResponse:
+async def me(
+    user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+) -> UserResponse:
     _prevent_caching(response)
     return UserResponse.from_user(user)
 
