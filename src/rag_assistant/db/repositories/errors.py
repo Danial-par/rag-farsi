@@ -13,5 +13,9 @@ class PersistenceConflictError(RepositoryError):
     """A uniqueness or concurrent-state conflict prevented persistence."""
 
 
+class ExtractionConflictError(PersistenceConflictError):
+    """Persisted extraction differs from a retry for the same document version."""
+
+
 class InvalidPersistenceStateError(RepositoryError):
     """An aggregate cannot perform the requested lifecycle transition."""

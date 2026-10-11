@@ -10,6 +10,7 @@ from rag_assistant.db.repositories.documents import (
     NewSourceParagraph,
 )
 from rag_assistant.db.repositories.errors import (
+    ExtractionConflictError,
     InvalidPersistenceStateError,
     PersistenceConflictError,
     RecordNotFoundError,
@@ -22,6 +23,7 @@ __all__ = [
     "ChunkParagraphReference",
     "ConversationRepository",
     "DocumentRepository",
+    "ExtractionConflictError",
     "InvalidPersistenceStateError",
     "NewChunk",
     "NewDocumentVersion",

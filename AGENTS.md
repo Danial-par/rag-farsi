@@ -55,6 +55,14 @@
 - Preserve original extracted Unicode without retrieval normalization for audit and citation display.
 - Normalize only the retrieval representation, including consistent Persian/Arabic character forms, digits, whitespace, and half-spaces.
 - Normalization must be deterministic and must not destroy the mapping from retrieval text to its original citation unit.
+- Normalize retrieval text with NFKC, Persian kaf and yeh forms, ASCII digits, collapsed whitespace, and valid single ZWNJs; remove Arabic vowel marks, tatweel, soft hyphens, ZWJ, and bidirectional controls.
+
+## PDF extraction rules
+
+- Use pypdf as the authoritative PDF text parser and pdfplumber only for geometry and explicit ruled-table detection.
+- The initial extraction profile supports born-digital, predominantly single-column PDFs and unambiguous ruled tables.
+- Fail ingestion for encrypted, malformed, empty, OCR-required, materially image-only, or ambiguous unsupported layouts rather than persisting incomplete evidence.
+- Add table-header context only to normalized table-row text; add section context later during chunk construction, not to source paragraphs.
 
 ## Persistence rules
 

@@ -22,6 +22,7 @@ from rag_assistant.db.models import (
 )
 from rag_assistant.db.models.document import EMBEDDING_DIMENSIONS
 from rag_assistant.db.repositories.errors import (
+    ExtractionConflictError,
     InvalidPersistenceStateError,
     RecordNotFoundError,
 )
@@ -301,6 +302,72 @@ class DocumentRepository:
         self._session.add_all(models)
         await self._session.flush()
         return models
+
+    async def persist_extraction(
+        self,
+        *,
+        version_id: UUID,
+        paragraphs: Sequence[NewSourceParagraph],
+        extraction_metadata: dict[str, Any],
+    ) -> list[SourceParagraph]:
+        """Atomically persist a deterministic extraction, preserving IDs on retries."""
+        version = await self._locked_version(version_id)
+        if version.status is not IngestionStatus.PROCESSING:
+            raise InvalidPersistenceStateError(
+                "Extraction can only be persisted while a version is processing"
+            )
+        if not paragraphs:
+            raise InvalidPersistenceStateError("Extraction must contain source paragraphs")
+
+        existing = list(
+            await self._session.scalars(
+                select(SourceParagraph)
+                .where(SourceParagraph.document_version_id == version.id)
+                .order_by(SourceParagraph.page_number, SourceParagraph.paragraph_number)
+            )
+        )
+        if existing:
+            if version.extraction_metadata == extraction_metadata and self._paragraphs_match(
+                existing, paragraphs
+            ):
+                return existing
+            raise ExtractionConflictError(
+                "Persisted extraction conflicts with the deterministic retry result"
+            )
+
+        models = [
+            SourceParagraph(
+                document_version_id=version.id,
+                page_number=value.page_number,
+                paragraph_number=value.paragraph_number,
+                kind=value.kind,
+                original_text=value.original_text,
+                normalized_text=value.normalized_text,
+                paragraph_metadata=value.metadata,
+            )
+            for value in paragraphs
+        ]
+        version.extraction_metadata = extraction_metadata
+        self._session.add_all(models)
+        await self._session.flush()
+        return models
+
+    @staticmethod
+    def _paragraphs_match(
+        existing: Sequence[SourceParagraph],
+        expected: Sequence[NewSourceParagraph],
+    ) -> bool:
+        if len(existing) != len(expected):
+            return False
+        return all(
+            current.page_number == value.page_number
+            and current.paragraph_number == value.paragraph_number
+            and current.kind is value.kind
+            and current.original_text == value.original_text
+            and current.normalized_text == value.normalized_text
+            and current.paragraph_metadata == value.metadata
+            for current, value in zip(existing, expected, strict=True)
+        )
 
     async def add_chunk(self, *, version_id: UUID, values: NewChunk) -> Chunk:
         version = await self._locked_version(version_id)
