@@ -64,6 +64,10 @@
 - Normalized chunk-to-paragraph rows are authoritative provenance. Chunks also retain a JSONB provenance snapshot, and completed assistant messages retain immutable validated citation snapshots.
 - Store execution status separately from answer outcome on assistant messages.
 - Authentication sessions are server-side revocation anchors referenced by JWT session claims; never store raw JWTs.
+- Public self-registration is enabled. Authentication uses HS256 with a dedicated environment secret, 15-minute access tokens, and rotating 30-day absolute refresh sessions.
+- Users may keep multiple independent device sessions. Refresh reuse outside a 10-second concurrency grace window revokes only the affected session family.
+- Authentication cookies are host-only and `SameSite=Lax`; they are secure in production, with double-submit CSRF protection for unsafe cookie-authenticated requests.
+- Production login and registration rate limiting is enforced at the deployment edge.
 - Conversations select logical documents. Active shared default documents are automatically selected for every user conversation.
 
 ## Repository development rules

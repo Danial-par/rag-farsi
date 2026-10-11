@@ -11,7 +11,13 @@ from alembic.config import Config
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.community.postgres import PostgresContainer
 
 os.environ.setdefault(
@@ -19,6 +25,7 @@ os.environ.setdefault(
     "postgresql+psycopg://rag_assistant:test@127.0.0.1:5432/rag_assistant_test",
 )
 os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("JWT_SECRET", "test-only-jwt-secret-with-at-least-32-bytes")
 
 from rag_assistant.core.config import (
     Settings,  # noqa: E402
@@ -41,6 +48,7 @@ def settings() -> Settings:
     return Settings(
         app_env="test",
         database_url="postgresql+psycopg://rag_assistant:test@127.0.0.1:5432/rag_assistant_test",
+        jwt_secret="test-only-jwt-secret-with-at-least-32-bytes",
     )
 
 
@@ -101,13 +109,37 @@ async def database_engine(migrated_database_url: str) -> AsyncIterator[AsyncEngi
 
 
 @pytest_asyncio.fixture
-async def db_session(database_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    """Roll back each integration test while preserving the migrated schema."""
+async def database_connection(database_engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     async with database_engine.connect() as connection:
         transaction = await connection.begin()
-        session = AsyncSession(bind=connection, expire_on_commit=False)
         try:
-            yield session
+            yield connection
         finally:
-            await session.close()
             await transaction.rollback()
+
+
+@pytest_asyncio.fixture
+async def db_session(database_connection: AsyncConnection) -> AsyncIterator[AsyncSession]:
+    """Roll back each integration test while preserving the migrated schema."""
+    session = AsyncSession(bind=database_connection, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        await session.close()
+
+
+@pytest_asyncio.fixture
+async def database_client(
+    application: FastAPI,
+    database_connection: AsyncConnection,
+) -> AsyncIterator[AsyncClient]:
+    """Serve requests against an isolated transaction in migrated PostgreSQL."""
+    application.state.session_factory = async_sessionmaker(
+        bind=database_connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    async with LifespanManager(application):
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as test_client:
+            yield test_client

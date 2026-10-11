@@ -133,6 +133,8 @@ async def test_auth_sessions_are_revocable_and_fail_closed_for_other_users(
     auth_session = await repository.create(
         user_id=user.id,
         expires_at=utc_now() + timedelta(hours=1),
+        refresh_token_hash="a" * 64,
+        csrf_token_hash="b" * 64,
         client_metadata={"user_agent": "tests"},
     )
 

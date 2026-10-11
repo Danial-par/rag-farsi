@@ -26,6 +26,8 @@ class AuthSessionRepository:
         *,
         user_id: UUID,
         expires_at: datetime,
+        refresh_token_hash: str,
+        csrf_token_hash: str,
         client_metadata: dict[str, Any] | None = None,
     ) -> AuthSession:
         user_exists = await self._session.scalar(
@@ -39,6 +41,8 @@ class AuthSessionRepository:
         auth_session = AuthSession(
             user_id=user_id,
             expires_at=expires_at,
+            refresh_token_hash=refresh_token_hash,
+            csrf_token_hash=csrf_token_hash,
             client_metadata=client_metadata or {},
         )
         self._session.add(auth_session)
@@ -47,6 +51,12 @@ class AuthSessionRepository:
 
     async def get_by_id(self, session_id: UUID) -> AuthSession | None:
         return await self._session.get(AuthSession, session_id)
+
+    async def get_for_update(self, session_id: UUID) -> AuthSession | None:
+        """Lock a session while rotating or revoking its refresh-token family."""
+        return await self._session.scalar(
+            select(AuthSession).where(AuthSession.id == session_id).with_for_update()
+        )
 
     async def get_active(
         self, session_id: UUID, *, at: datetime | None = None
@@ -64,9 +74,7 @@ class AuthSessionRepository:
         )
 
     async def revoke(self, session_id: UUID, *, reason: str | None = None) -> AuthSession:
-        auth_session = await self._session.scalar(
-            select(AuthSession).where(AuthSession.id == session_id).with_for_update()
-        )
+        auth_session = await self.get_for_update(session_id)
         if auth_session is None:
             raise RecordNotFoundError("Authentication session not found")
         if auth_session.revoked_at is None:
