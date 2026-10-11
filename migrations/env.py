@@ -8,6 +8,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import rag_assistant.db.models  # noqa: F401
 from rag_assistant.core.config import get_settings
 from rag_assistant.core.event_loop import compatible_event_loop_factory
 from rag_assistant.db.base import Base

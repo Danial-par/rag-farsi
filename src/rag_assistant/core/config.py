@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     database_pool_size: int = Field(default=5, ge=1, le=100)
     database_max_overflow: int = Field(default=10, ge=0, le=100)
+    embedding_model: str = "openai/text-embedding-3-large"
+    embedding_dimensions: int = Field(default=1024, ge=1, le=4096)
 
     @field_validator("log_level", mode="before")
     @classmethod

@@ -56,6 +56,16 @@
 - Normalize only the retrieval representation, including consistent Persian/Arabic character forms, digits, whitespace, and half-spaces.
 - Normalization must be deterministic and must not destroy the mapping from retrieval text to its original citation unit.
 
+## Persistence rules
+
+- Generate UUIDs and timezone-aware UTC timestamps in the application.
+- Soft-delete logical documents. Versions that have ever been active remain immutable and addressable until an explicit aggregate purge; never-activated versions may be hard-deleted.
+- A document points to its one active, successfully ingested immutable version. Version numbers are sequential within a document, while content hashes are indexed but not unique.
+- Normalized chunk-to-paragraph rows are authoritative provenance. Chunks also retain a JSONB provenance snapshot, and completed assistant messages retain immutable validated citation snapshots.
+- Store execution status separately from answer outcome on assistant messages.
+- Authentication sessions are server-side revocation anchors referenced by JWT session claims; never store raw JWTs.
+- Conversations select logical documents. Active shared default documents are automatically selected for every user conversation.
+
 ## Repository development rules
 
 - Support Python 3.12 and manage dependencies with uv using a committed lockfile.
@@ -69,5 +79,6 @@
 - Make schema changes with reviewed migrations; do not rely on runtime table creation in production.
 - Add focused tests for behavior, authorization boundaries, Persian normalization, citation resolution, abstention, and migrations as those features are introduced.
 - Use deterministic fixtures and mock external model, object-storage, and observability calls in automated tests.
+- Run PostgreSQL integration and migration tests against a disposable pgvector database provided by Testcontainers.
 - Trace every LangGraph node with Langfuse without recording secrets or authentication tokens.
 - Preserve this file for durable, project-wide facts only. Do not add roadmap status, implementation history, rationale, or temporary task notes.
