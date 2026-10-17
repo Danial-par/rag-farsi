@@ -5,7 +5,7 @@ from datetime import timedelta
 from time import perf_counter
 
 import structlog
-from langfuse import observe
+from langfuse import get_client, observe
 
 from rag_assistant.core.config import Settings
 from rag_assistant.db.base import utc_now
@@ -51,16 +51,34 @@ class DocumentIngestionWorker:
             ingestion_attempt_id=str(claim.attempt_id),
         )
         started = perf_counter()
+        get_client().update_current_span(
+            metadata={
+                "document_id": str(claim.document_id),
+                "document_version_id": str(claim.version_id),
+                "ingestion_attempt_id": str(claim.attempt_id),
+            }
+        )
         await log.ainfo("worker_attempt_started")
         try:
             await self._indexing_service.index_claim(claim)
         except Exception as exc:
+            get_client().update_current_span(
+                metadata={
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                    "error_code": "ingestion_attempt_failed",
+                },
+                level="ERROR",
+                status_message="ingestion_attempt_failed",
+            )
             await log.aerror(
                 "worker_attempt_failed",
                 exception_type=type(exc).__name__,
                 duration_ms=round((perf_counter() - started) * 1000, 2),
             )
         else:
+            get_client().update_current_span(
+                metadata={"duration_ms": round((perf_counter() - started) * 1000, 2)}
+            )
             await log.ainfo(
                 "worker_attempt_completed",
                 duration_ms=round((perf_counter() - started) * 1000, 2),
@@ -86,9 +104,7 @@ class DocumentIngestionWorker:
                 try:
                     await self._object_store.delete(item.key)
                 except ObjectStoreError:
-                    await self._logger.awarning(
-                        "orphan_object_cleanup_failed", object_key=item.key
-                    )
+                    await self._logger.awarning("orphan_object_cleanup_failed", object_key=item.key)
                 else:
                     deleted += 1
                     await self._logger.ainfo("orphan_object_removed", object_key=item.key)

@@ -90,6 +90,7 @@
 - Store execution status separately from answer outcome on assistant messages.
 - Run the RAG graph statelessly per request without checkpointing or graph-level retries. After conversation authorization, atomically create and commit the user message plus pending assistant message; terminal completion or failure is persisted separately.
 - Require an `Idempotency-Key` for chat message creation, scoped to the conversation and authenticated owner; retries return the original assistant result, and key reuse with a different question conflicts.
+- Renew active assistant execution timestamps with a heartbeat. Fail pending executions after 10 minutes without renewal with `execution_abandoned`; clients retry with a new idempotency key.
 - Conversation selection updates replace the explicit selection while retaining active shared default documents automatically. Conversation and message pagination uses descending creation or update timestamps with UUID tie-breakers and opaque cursors.
 - The chat API waits for the complete non-streaming workflow. Failed assistant executions return HTTP 503 with the persisted assistant-message identifier; execution status and answer outcome remain separate response fields.
 - API citations represent the complete immutable source paragraph and expose null offsets, including for paragraphs split across retrieval chunks.
@@ -115,5 +116,8 @@
 - Add focused tests for behavior, authorization boundaries, Persian normalization, citation resolution, abstention, and migrations as those features are introduced.
 - Use deterministic fixtures and mock external model, object-storage, and observability calls in automated tests.
 - Run PostgreSQL integration and migration tests against a disposable pgvector database provided by Testcontainers.
-- Trace every LangGraph node with Langfuse without recording secrets or authentication tokens.
+- Trace every LangGraph node with Langfuse. Questions and final answers may be traced; source document text, citations, raw provider responses, cookies, JWTs, and secrets must not be recorded.
+- Production requires OpenRouter credentials, S3 storage, and exact allowed browser origins. Trust forwarded headers only from configured proxy IP addresses or CIDRs.
+- Keep deterministic evaluation offline and advisory by default; live provider evaluations are explicitly invoked and excluded from normal tests.
+- Run the locked lint, formatting, type, migration, and test checks in GitHub Actions on pushes and pull requests.
 - Preserve this file for durable, project-wide facts only. Do not add roadmap status, implementation history, rationale, or temporary task notes.

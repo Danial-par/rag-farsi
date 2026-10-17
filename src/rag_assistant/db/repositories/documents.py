@@ -292,9 +292,7 @@ class DocumentRepository:
             embedding_dimensions=version.embedding_dimensions,
         )
 
-    async def claim_next_for_indexing(
-        self, *, lease_duration: timedelta
-    ) -> IngestionClaim | None:
+    async def claim_next_for_indexing(self, *, lease_duration: timedelta) -> IngestionClaim | None:
         """Claim one pending or abandoned version under a skip-locked row lock."""
         now = utc_now()
         version = await self._session.scalar(

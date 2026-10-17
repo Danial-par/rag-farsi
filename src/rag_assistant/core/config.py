@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, PostgresDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +36,10 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = Field(default=900, ge=60, le=3600)
     refresh_token_ttl_days: int = Field(default=30, ge=1, le=365)
     refresh_reuse_grace_seconds: int = Field(default=10, ge=0, le=60)
+    allowed_origins: list[str] = Field(default_factory=list)
+    trusted_proxy_hosts: list[str] = Field(default_factory=list)
+    assistant_execution_timeout_seconds: int = Field(default=600, ge=60, le=3600)
+    assistant_execution_recovery_poll_seconds: int = Field(default=30, ge=5, le=300)
 
     openrouter_base_url: AnyHttpUrl = AnyHttpUrl("https://openrouter.ai/api/v1")
     openrouter_api_key: SecretStr | None = None
@@ -84,10 +90,45 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_TARGET_TOKENS cannot exceed CHUNK_MAX_TOKENS")
         if (self.langfuse_public_key is None) != (self.langfuse_secret_key is None):
             raise ValueError("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must be set together")
+        if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):
+            raise ValueError("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together")
         if self.app_env == "production" and self.object_store_backend != "s3":
             raise ValueError("Production requires OBJECT_STORE_BACKEND=s3")
         if self.app_env == "production" and not self.s3_bucket:
             raise ValueError("S3_BUCKET is required in production")
+        if self.app_env == "production":
+            if self.openrouter_api_key is None:
+                raise ValueError("OPENROUTER_API_KEY is required in production")
+            if not self.allowed_origins:
+                raise ValueError("ALLOWED_ORIGINS must contain at least one production origin")
+        for origin in self.allowed_origins:
+            parsed = urlsplit(origin)
+            try:
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("ALLOWED_ORIGINS entries must be exact HTTP(S) origins") from exc
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or (port is not None and not 0 < port < 65536)
+                or parsed.query
+                or parsed.fragment
+                or origin == "*"
+            ):
+                raise ValueError("ALLOWED_ORIGINS entries must be exact HTTP(S) origins")
+            if self.app_env == "production" and parsed.scheme != "https":
+                raise ValueError("Production ALLOWED_ORIGINS must use HTTPS")
+        for proxy in self.trusted_proxy_hosts:
+            try:
+                ip_network(proxy, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    "TRUSTED_PROXY_HOSTS entries must be IP addresses or CIDRs"
+                ) from exc
         return self
 
     @property

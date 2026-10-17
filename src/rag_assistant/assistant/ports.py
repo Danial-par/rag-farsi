@@ -60,6 +60,10 @@ class WorkflowPersistence(Protocol):
         self, *, user_id: UUID, conversation_id: UUID, question: str, idempotency_key: str
     ) -> ExecutionRecord: ...
 
+    async def renew_execution_lease(
+        self, *, user_id: UUID, conversation_id: UUID, idempotency_key: str
+    ) -> None: ...
+
     async def complete_execution(
         self, *, user_id: UUID, assistant_message_id: UUID, answer: AnswerCandidate
     ) -> RAGGraphOutput: ...
@@ -103,3 +107,4 @@ class RAGDependencies:
     validator: AnswerValidator
     persistence: WorkflowPersistence
     observer: NodeObserver = field(default_factory=LangfuseNodeObserver)
+    execution_heartbeat_seconds: int = 30

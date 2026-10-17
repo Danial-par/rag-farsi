@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from time import perf_counter
 from typing import Any, NotRequired, TypedDict, cast
 from uuid import UUID
 
-from langfuse import observe
+import structlog
+from langfuse import get_client, observe
 from langgraph.graph import END, START, StateGraph
 
 from rag_assistant.assistant.errors import ConversationAuthorizationError, WorkflowExecutionError
@@ -59,30 +63,82 @@ NodeAction = Callable[[], Awaitable[NodeResult]]
 class RAGWorkflow:
     """Run a compiled graph without checkpoints or graph-level retries."""
 
-    def __init__(self, compiled_graph: Any) -> None:
+    def __init__(self, compiled_graph: Any, dependencies: RAGDependencies) -> None:
         self._compiled_graph = compiled_graph
+        self._persistence = dependencies.persistence
+        self._heartbeat_seconds = dependencies.execution_heartbeat_seconds
 
+    @observe(name="rag.request", capture_input=False, capture_output=False)
     async def ainvoke(self, graph_input: RAGGraphInput) -> RAGGraphOutput:
         """Execute one request and return only a terminal persisted result."""
-        final_state = cast(
-            RAGState,
-            await self._compiled_graph.ainvoke(
-                {
-                    "user_id": graph_input.user_id,
-                    "conversation_id": graph_input.conversation_id,
-                    "question": graph_input.question,
-                    "idempotency_key": graph_input.idempotency_key,
-                }
-            ),
-        )
+        request_id = structlog.contextvars.get_contextvars().get("request_id")
+        trace_metadata: dict[str, str] = {
+            "conversation_id": str(graph_input.conversation_id),
+        }
+        if isinstance(request_id, str):
+            trace_metadata["request_id"] = request_id
+        client = get_client()
+        client.update_current_trace(input=graph_input.question, metadata=trace_metadata)
+        heartbeat = asyncio.create_task(self._maintain_execution_lease(graph_input))
+        try:
+            final_state = cast(
+                RAGState,
+                await self._compiled_graph.ainvoke(
+                    {
+                        "user_id": graph_input.user_id,
+                        "conversation_id": graph_input.conversation_id,
+                        "question": graph_input.question,
+                        "idempotency_key": graph_input.idempotency_key,
+                    }
+                ),
+            )
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
         output = final_state.get("output")
         if output is not None:
+            client.update_current_trace(
+                output=output.content,
+                metadata={
+                    **trace_metadata,
+                    "assistant_message_id": str(output.assistant_message_id),
+                    "execution_status": output.status.value,
+                    "answer_outcome": output.outcome.value if output.outcome else "none",
+                    **({"error_code": output.error_code} if output.error_code else {}),
+                },
+            )
             return output
 
         failure = final_state.get("failure")
         if failure is not None and failure.error_code == "conversation_authorization_failed":
+            client.update_current_trace(
+                metadata={**trace_metadata, "error_code": failure.error_code}
+            )
             raise ConversationAuthorizationError(failure.safe_message)
+        if failure is not None:
+            client.update_current_trace(
+                metadata={**trace_metadata, "error_code": failure.error_code}
+            )
         raise WorkflowExecutionError("The assistant execution did not reach a terminal state")
+
+    async def _maintain_execution_lease(self, graph_input: RAGGraphInput) -> None:
+        logger = structlog.stdlib.get_logger("rag_assistant.assistant.lease")
+        while True:
+            await asyncio.sleep(self._heartbeat_seconds)
+            try:
+                await self._persistence.renew_execution_lease(
+                    user_id=graph_input.user_id,
+                    conversation_id=graph_input.conversation_id,
+                    idempotency_key=graph_input.idempotency_key,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await logger.awarning(
+                    "assistant_execution_lease_renewal_failed",
+                    error_type=type(exc).__name__,
+                )
 
 
 def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
@@ -97,6 +153,9 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
         metadata: dict[str, str | int] = {
             "conversation_id": str(state["conversation_id"]),
         }
+        request_id = structlog.contextvars.get_contextvars().get("request_id")
+        if isinstance(request_id, str):
+            metadata["request_id"] = request_id
         execution = state.get("execution")
         if execution is not None:
             metadata["assistant_message_id"] = str(execution.assistant_message_id)
@@ -110,12 +169,26 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
         node_name: str,
         action: NodeAction,
     ) -> NodeResult:
+        started = perf_counter()
         try:
-            return await action()
+            result = await action()
+            get_client().update_current_span(
+                metadata={"duration_ms": round((perf_counter() - started) * 1000, 2)}
+            )
+            return result
         except IdempotencyConflictError:
             raise
         except Exception as exc:
-            return {"failure": _classify_failure(node_name, exc)}
+            failure = _classify_failure(node_name, exc)
+            get_client().update_current_span(
+                metadata={
+                    "duration_ms": round((perf_counter() - started) * 1000, 2),
+                    "error_code": failure.error_code,
+                },
+                level="ERROR",
+                status_message=failure.error_code,
+            )
+            return {"failure": failure}
 
     @observe(name="rag.load_conversation", capture_input=False, capture_output=False)
     async def load_conversation(state: RAGState) -> NodeResult:
@@ -360,7 +433,7 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
         {"complete": END, "failed": "persist_failed"},
     )
     graph.add_edge("persist_failed", END)
-    return RAGWorkflow(graph.compile())
+    return RAGWorkflow(graph.compile(), dependencies)
 
 
 def _route_after_initialization(state: RAGState) -> str:

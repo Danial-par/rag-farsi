@@ -193,6 +193,25 @@ async def test_generator_renders_partial_answer_with_unsupported_portion() -> No
 
 
 @pytest.mark.asyncio
+async def test_generator_localizes_partial_answer_for_english_question() -> None:
+    model = FakeStructuredModel(
+        [
+            _response(
+                AnswerOutcome.PARTIALLY_ANSWERED,
+                claims=[AnswerClaim(text="One supported fact", citations=["E1"])],
+                unsupported_parts=["The exact date is not stated."],
+            )
+        ]
+    )
+    answer = await OpenRouterAnswerGenerator(model=model).generate(
+        question="What happened and on which exact date?", history=(), evidence=_evidence()
+    )
+
+    assert "Unsupported portion: The exact date is not stated." in answer.content
+    assert "بخش پشتیبانی‌نشده" not in answer.content
+
+
+@pytest.mark.asyncio
 async def test_irrelevant_nonempty_evidence_can_return_citation_free_abstention() -> None:
     evidence = _evidence(text="متن نامرتبط درباره موضوعی دیگر")
     model = FakeStructuredModel([_response(AnswerOutcome.ABSTAINED)])

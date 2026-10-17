@@ -3,10 +3,19 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_assistant.db.base import utc_now
-from rag_assistant.db.models import AnswerOutcome, IngestionStatus, ParagraphKind, User
+from rag_assistant.db.models import (
+    AnswerOutcome,
+    IngestionStatus,
+    Message,
+    MessageRole,
+    MessageStatus,
+    ParagraphKind,
+    User,
+)
 from rag_assistant.db.repositories import (
     AuthSessionRepository,
     ConversationRepository,
@@ -39,6 +48,95 @@ async def _create_user(session: AsyncSession, email: str) -> User:
 async def _succeed_version(repository: DocumentRepository, version_id: UUID) -> None:
     await repository.mark_processing(version_id)
     await repository.mark_succeeded(version_id, extraction_metadata={})
+
+
+async def test_abandoned_assistant_execution_is_failed_and_retry_returns_terminal_result(
+    db_session: AsyncSession,
+) -> None:
+    owner = await _create_user(db_session, "abandoned@example.com")
+    conversations = ConversationRepository(db_session)
+    conversation = await conversations.create(owner_id=owner.id)
+    stale_at = utc_now() - timedelta(minutes=11)
+    db_session.add_all(
+        [
+            Message(
+                conversation_id=conversation.id,
+                role=MessageRole.USER,
+                status=MessageStatus.COMPLETED,
+                content="پرسش آزمایشی",
+                idempotency_key="abandoned-key",
+                citation_snapshot=[],
+                model_usage={},
+                provider_metadata={},
+                created_at=stale_at,
+                updated_at=stale_at,
+            ),
+            Message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT,
+                status=MessageStatus.PENDING,
+                content=None,
+                idempotency_key="abandoned-key",
+                citation_snapshot=[],
+                model_usage={},
+                provider_metadata={},
+                created_at=stale_at,
+                updated_at=stale_at,
+            ),
+        ]
+    )
+    await db_session.flush()
+    assistant = await db_session.scalar(
+        select(Message).where(
+            Message.conversation_id == conversation.id,
+            Message.role == MessageRole.ASSISTANT,
+        )
+    )
+    assert assistant is not None
+    assistant_id = assistant.id
+
+    recovered = await conversations.fail_abandoned_assistant_messages(
+        before=utc_now() - timedelta(minutes=10)
+    )
+    retry = await conversations.create_execution(
+        owner_id=owner.id,
+        conversation_id=conversation.id,
+        question="پرسش آزمایشی",
+        idempotency_key="abandoned-key",
+    )
+
+    assert recovered == 1
+    assert assistant.status is MessageStatus.FAILED
+    assert assistant.error_code == "execution_abandoned"
+    assert retry[1] == assistant_id
+    assert retry[2] is not None
+    assert retry[2]["status"] == MessageStatus.FAILED.value
+
+
+async def test_pending_assistant_heartbeat_renews_only_the_pending_execution(
+    db_session: AsyncSession,
+) -> None:
+    owner = await _create_user(db_session, "heartbeat@example.com")
+    conversations = ConversationRepository(db_session)
+    conversation = await conversations.create(owner_id=owner.id)
+    _, assistant_id, _ = await conversations.create_execution(
+        owner_id=owner.id,
+        conversation_id=conversation.id,
+        question="پرسش در حال اجرا",
+        idempotency_key="heartbeat-key",
+    )
+    before = utc_now()
+
+    await conversations.renew_execution_lease(
+        owner_id=owner.id,
+        conversation_id=conversation.id,
+        idempotency_key="heartbeat-key",
+    )
+    assistant = await db_session.get(Message, assistant_id)
+
+    assert assistant is not None
+    await db_session.refresh(assistant)
+    assert assistant.updated_at >= before
 
 
 async def test_document_queries_enforce_ownership_and_include_shared_documents(

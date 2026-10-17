@@ -37,6 +37,8 @@ def run(argv: Sequence[str] | None = None) -> None:
         reload=args.reload,
         loop="rag_assistant.core.event_loop:compatible_event_loop_factory",
         access_log=False,
+        proxy_headers=bool(get_settings().trusted_proxy_hosts),
+        forwarded_allow_ips=",".join(get_settings().trusted_proxy_hosts) or "",
     )
 
 
@@ -66,6 +68,10 @@ async def _ingest_version(version_id: UUID, settings: Settings) -> None:
         await service.index_version(version_id)
     finally:
         await embedding_client.aclose()
+        from langfuse import get_client
+
+        get_client().flush()
+        get_client().shutdown()
         await engine.dispose()
 
 
@@ -106,6 +112,10 @@ async def _run_worker(settings: Settings) -> None:
         ).run_forever()
     finally:
         await embedding_client.aclose()
+        from langfuse import get_client
+
+        get_client().flush()
+        get_client().shutdown()
         await engine.dispose()
 
 

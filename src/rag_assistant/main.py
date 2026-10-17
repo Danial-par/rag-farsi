@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from langfuse import get_client
 
 from rag_assistant import __version__
 from rag_assistant.api.health import router as health_router
@@ -22,6 +26,8 @@ from rag_assistant.assistant import (
 from rag_assistant.core.config import Settings, get_settings
 from rag_assistant.core.logging import RequestContextMiddleware, configure_logging
 from rag_assistant.core.security import PasswordManager, TokenManager
+from rag_assistant.db.base import utc_now
+from rag_assistant.db.repositories import ConversationRepository
 from rag_assistant.db.session import AsyncSessionFactory, create_database_resources
 from rag_assistant.indexing import create_object_store
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
@@ -61,36 +67,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         embedding_client = None
-        if resolved_settings.openrouter_api_key is not None:
-            embedding_client = OpenRouterEmbeddingClient(
-                base_url=str(resolved_settings.openrouter_base_url),
-                api_key=resolved_settings.openrouter_api_key.get_secret_value(),
-                connect_timeout_seconds=resolved_settings.embedding_connect_timeout_seconds,
-                read_timeout_seconds=resolved_settings.embedding_read_timeout_seconds,
-            )
-            application.state.rag_workflow = create_rag_workflow(
-                RAGDependencies(
-                    retriever=_SessionScopedRetriever(
-                        session_factory, embedding_client, resolved_settings
-                    ),
-                    generator=OpenRouterAnswerGenerator.from_settings(resolved_settings),
-                    validator=EvidenceAnswerValidator(),
-                    persistence=SqlAlchemyWorkflowPersistence(session_factory),
-                    observer=LangfuseNodeObserver(),
-                )
-            )
-        else:
-            application.state.rag_workflow = None
-        await logger.ainfo(
-            "application_started",
-            environment=resolved_settings.app_env,
-            version=__version__,
-        )
+        recovery_task = None
         try:
+            if resolved_settings.openrouter_api_key is not None:
+                embedding_client = OpenRouterEmbeddingClient(
+                    base_url=str(resolved_settings.openrouter_base_url),
+                    api_key=resolved_settings.openrouter_api_key.get_secret_value(),
+                    connect_timeout_seconds=resolved_settings.embedding_connect_timeout_seconds,
+                    read_timeout_seconds=resolved_settings.embedding_read_timeout_seconds,
+                )
+                application.state.rag_workflow = create_rag_workflow(
+                    RAGDependencies(
+                        retriever=_SessionScopedRetriever(
+                            session_factory, embedding_client, resolved_settings
+                        ),
+                        generator=OpenRouterAnswerGenerator.from_settings(resolved_settings),
+                        validator=EvidenceAnswerValidator(),
+                        persistence=SqlAlchemyWorkflowPersistence(session_factory),
+                        observer=LangfuseNodeObserver(),
+                        execution_heartbeat_seconds=resolved_settings.assistant_execution_recovery_poll_seconds,
+                    )
+                )
+            else:
+                application.state.rag_workflow = None
+            if resolved_settings.app_env != "test":
+                recovery_task = asyncio.create_task(
+                    _recover_abandoned_executions(
+                        application.state.session_factory, resolved_settings
+                    )
+                )
+            await logger.ainfo(
+                "application_started",
+                environment=resolved_settings.app_env,
+                version=__version__,
+            )
             yield
         finally:
+            if recovery_task is not None:
+                recovery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await recovery_task
             if embedding_client is not None:
                 await embedding_client.aclose()
+            get_client().flush()
+            get_client().shutdown()
             await engine.dispose()
             await logger.ainfo("application_stopped")
 
@@ -99,6 +119,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    if resolved_settings.allowed_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=resolved_settings.allowed_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"],
+            expose_headers=["X-Request-ID"],
+        )
     application.state.settings = resolved_settings
     application.state.object_store = create_object_store(resolved_settings)
     application.state.database_engine = engine
@@ -124,6 +153,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(health_router)
     application.include_router(api_router)
     return application
+
+
+async def _recover_abandoned_executions(
+    session_factory: AsyncSessionFactory, settings: Settings
+) -> None:
+    """Periodically terminalize chat executions whose process stopped renewing them."""
+    interval = settings.assistant_execution_recovery_poll_seconds
+    timeout = settings.assistant_execution_timeout_seconds
+    logger = structlog.stdlib.get_logger("rag_assistant.assistant.recovery")
+    while True:
+        try:
+            async with session_factory.begin() as session:
+                recovered = await ConversationRepository(session).fail_abandoned_assistant_messages(
+                    before=utc_now() - timedelta(seconds=timeout)
+                )
+            if recovered:
+                await logger.awarning("abandoned_assistant_executions_failed", count=recovered)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await logger.aerror(
+                "assistant_execution_recovery_failed", error_type=type(exc).__name__
+            )
+        await asyncio.sleep(interval)
 
 
 app = create_app()

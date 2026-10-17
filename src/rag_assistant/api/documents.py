@@ -137,15 +137,11 @@ async def _read_pdf_body(request: Request, *, maximum_bytes: int) -> bytes:
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length") from exc
         if declared_length > maximum_bytes:
-            raise HTTPException(
-                status.HTTP_413_CONTENT_TOO_LARGE, "PDF exceeds the upload limit"
-            )
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "PDF exceeds the upload limit")
     received = bytearray()
     async for part in request.stream():
         if len(received) + len(part) > maximum_bytes:
-            raise HTTPException(
-                status.HTTP_413_CONTENT_TOO_LARGE, "PDF exceeds the upload limit"
-            )
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "PDF exceeds the upload limit")
         received.extend(part)
     payload = bytes(received)
     if not payload:

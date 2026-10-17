@@ -56,12 +56,8 @@ async def test_local_object_listing_supports_bounded_continuation(tmp_path: Path
         await store.put(f"documents/{name}", b"fixture", content_type="application/pdf")
 
     first = await store.list("documents/", limit=1)
-    second = await store.list(
-        "documents/", limit=1, continuation_token=first.continuation_token
-    )
-    third = await store.list(
-        "documents/", limit=1, continuation_token=second.continuation_token
-    )
+    second = await store.list("documents/", limit=1, continuation_token=first.continuation_token)
+    third = await store.list("documents/", limit=1, continuation_token=second.continuation_token)
 
     assert [first.objects[0].key, second.objects[0].key, third.objects[0].key] == [
         "documents/a.pdf",

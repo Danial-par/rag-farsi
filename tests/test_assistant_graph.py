@@ -96,6 +96,11 @@ class FakePersistence:
         self._executions.append(execution)
         return execution
 
+    async def renew_execution_lease(
+        self, *, user_id: UUID, conversation_id: UUID, idempotency_key: str
+    ) -> None:
+        del user_id, conversation_id, idempotency_key
+
     async def complete_execution(
         self, *, user_id: UUID, assistant_message_id: UUID, answer: AnswerCandidate
     ) -> RAGGraphOutput:

@@ -62,6 +62,17 @@ class SqlAlchemyWorkflowPersistence:
                 existing_output=existing_output,
             )
 
+    async def renew_execution_lease(
+        self, *, user_id: UUID, conversation_id: UUID, idempotency_key: str
+    ) -> None:
+        """Keep an actively running graph from being classified as abandoned."""
+        async with self._session_factory.begin() as session:
+            await ConversationRepository(session).renew_execution_lease(
+                owner_id=user_id,
+                conversation_id=conversation_id,
+                idempotency_key=idempotency_key,
+            )
+
     async def complete_execution(
         self, *, user_id: UUID, assistant_message_id: UUID, answer: AnswerCandidate
     ) -> RAGGraphOutput:

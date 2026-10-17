@@ -111,6 +111,49 @@ class ConversationRepository:
         await self._session.flush()
         return user_message.id, assistant_message.id, None
 
+    async def renew_execution_lease(
+        self, *, owner_id: UUID, conversation_id: UUID, idempotency_key: str
+    ) -> None:
+        """Refresh the lease for a pending execution owned by this request scope."""
+        message = await self._session.scalar(
+            select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.role == MessageRole.ASSISTANT,
+                Message.status == MessageStatus.PENDING,
+                Message.idempotency_key == idempotency_key,
+                Conversation.owner_id == owner_id,
+                Conversation.deleted_at.is_(None),
+            )
+            .with_for_update(of=Message)
+        )
+        if message is not None:
+            message.updated_at = utc_now()
+            await self._session.flush()
+
+    async def fail_abandoned_assistant_messages(self, *, before: datetime, limit: int = 100) -> int:
+        """Fail stale pending executions under row locks so concurrent sweepers are safe."""
+        messages = list(
+            await self._session.scalars(
+                select(Message)
+                .where(
+                    Message.role == MessageRole.ASSISTANT,
+                    Message.status == MessageStatus.PENDING,
+                    Message.updated_at < before,
+                )
+                .order_by(Message.updated_at, Message.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for message in messages:
+            message.status = MessageStatus.FAILED
+            message.error_code = "execution_abandoned"
+            message.error_message = "The assistant execution did not finish. Submit a new request."
+        await self._session.flush()
+        return len(messages)
+
     async def replace_documents(
         self, *, owner_id: UUID, conversation_id: UUID, document_ids: Sequence[UUID]
     ) -> list[Document]:

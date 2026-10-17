@@ -98,7 +98,7 @@ class OpenRouterAnswerGenerator:
             raise ValueError("The answer model did not return valid structured output")
 
         structured = response["parsed"]
-        return _candidate_from_structured(structured, alias_sources, response.get("raw"))
+        return _candidate_from_structured(question, structured, alias_sources, response.get("raw"))
 
 
 class EvidenceAnswerValidator:
@@ -201,6 +201,7 @@ def _citation_aliases(evidence: RetrievalResult) -> dict[str, Any]:
 
 
 def _candidate_from_structured(
+    question: str,
     structured: StructuredAnswer,
     aliases: dict[str, Any],
     raw: Any,
@@ -250,12 +251,15 @@ def _candidate_from_structured(
             or structured.abstention_text is not None
         ):
             raise ValueError("Partial answers require supported and unsupported portions")
-        unsupported = "؛ ".join(
+        persian_question = any("\u0600" <= character <= "\u06ff" for character in question)
+        separator = "؛ " if persian_question else "; "
+        unsupported = separator.join(
             part.strip() for part in structured.unsupported_parts if part.strip()
         )
         if not unsupported:
             raise ValueError("Partial answer unsupported portions cannot be blank")
-        content = f"{'\n'.join(rendered_claims)}\n\nبخش پشتیبانی‌نشده: {unsupported}"
+        label = "بخش پشتیبانی‌نشده" if persian_question else "Unsupported portion"
+        content = f"{'\n'.join(rendered_claims)}\n\n{label}: {unsupported}"
 
     return AnswerCandidate(
         content=content,
