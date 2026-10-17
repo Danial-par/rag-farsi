@@ -180,6 +180,12 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
             raise
         except Exception as exc:
             failure = _classify_failure(node_name, exc)
+            await structlog.stdlib.get_logger("rag_assistant.assistant.workflow").awarning(
+                "rag_node_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+                error_code=failure.error_code,
+            )
             get_client().update_current_span(
                 metadata={
                     "duration_ms": round((perf_counter() - started) * 1000, 2),
