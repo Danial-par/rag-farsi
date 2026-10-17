@@ -64,6 +64,24 @@ async def test_document_upload_hashes_source_and_returns_pending_version(
         assert row.object_key.startswith(f"documents/{owner['id']}/")
 
 
+async def test_available_documents_includes_shared_defaults(
+    database_client: AsyncClient,
+    database_connection: AsyncConnection,
+) -> None:
+    await _register(database_client, "shared-browser@example.com")
+    async with AsyncSession(bind=database_connection) as session, session.begin():
+        await DocumentRepository(session).create_shared(
+            title="Shared sample",
+            default_for_all_users=True,
+            metadata={"seed_key": "test-shared"},
+        )
+
+    response = await database_client.get("/api/v1/documents/available")
+
+    assert response.status_code == 200
+    assert [document["title"] for document in response.json()["items"]] == ["Shared sample"]
+
+
 async def test_upload_rejects_media_type_empty_body_and_non_pdf(
     database_client: AsyncClient,
 ) -> None:

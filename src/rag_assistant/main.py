@@ -4,12 +4,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from rag_assistant import __version__
 from rag_assistant.api.health import router as health_router
@@ -32,6 +34,7 @@ from rag_assistant.db.session import AsyncSessionFactory, create_database_resour
 from rag_assistant.indexing import create_object_store
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, RetrievalService
+from rag_assistant.web.router import router as web_router
 
 
 class _SessionScopedRetriever:
@@ -152,6 +155,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(health_router)
     application.include_router(api_router)
+    application.mount(
+        "/static",
+        StaticFiles(directory=str(Path(__file__).parent / "web" / "static")),
+        name="static",
+    )
+    application.include_router(web_router)
     return application
 
 

@@ -245,6 +245,18 @@ async def list_documents(
     return DocumentPageResponse(items=[DocumentResponse.from_document(item) for item in documents])
 
 
+@router.get("/available", response_model=DocumentPageResponse)
+async def list_available_documents(
+    user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> DocumentPageResponse:
+    """List documents the user can select, including shared documents."""
+    response.headers["Cache-Control"] = "no-store"
+    documents = await DocumentRepository(session).list_accessible(user_id=user.id)
+    return DocumentPageResponse(items=[DocumentResponse.from_document(item) for item in documents])
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def read_document(
     document_id: UUID,

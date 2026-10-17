@@ -158,6 +158,7 @@ tmp-api-key-private.txt
 tmp-api-langfuse.txt
 .local-data/
 .venv
+.uv-cache/
 env/
 venv/
 ENV/

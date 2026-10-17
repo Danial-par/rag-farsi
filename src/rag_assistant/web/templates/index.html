@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f5f0">
+    <title>دستیار اسناد</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <main id="auth-view" class="auth-shell" hidden>
+      <section class="auth-card" aria-labelledby="auth-title">
+        <p class="eyebrow">دستیار اسناد فارسی</p>
+        <h1 id="auth-title">به فضای گفت‌وگو خوش آمدید</h1>
+        <p class="muted">برای گفتگو با اسناد خود وارد شوید یا حساب بسازید.</p>
+        <div class="auth-tabs" role="group" aria-label="نوع ورود">
+          <button type="button" class="tab active" data-auth-mode="login">ورود</button>
+          <button type="button" class="tab" data-auth-mode="register">ساخت حساب</button>
+        </div>
+        <form id="auth-form">
+          <label for="auth-email">ایمیل</label>
+          <input id="auth-email" name="email" type="email" autocomplete="email" required>
+          <label for="auth-password">گذرواژه</label>
+          <input id="auth-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="current-password" required>
+          <button class="primary full" type="submit" id="auth-submit">ورود</button>
+        </form>
+        <p id="auth-error" class="notice error" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <div id="app-view" class="app-shell" hidden>
+      <header class="topbar">
+        <button id="menu-toggle" class="icon-button mobile-only" type="button" aria-label="نمایش گفتگوها" aria-expanded="false">☰</button>
+        <a class="brand" href="/" aria-label="دستیار اسناد، صفحه اصلی"><span class="brand-mark">ر</span><span>دستیار اسناد</span></a>
+        <div class="topbar-actions">
+          <span id="user-email" class="user-email" dir="ltr"></span>
+          <button id="logout-button" class="quiet-button" type="button">خروج</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside id="sidebar" class="sidebar" aria-label="گفتگوها و اسناد">
+          <div class="sidebar-heading"><h2>گفتگوها</h2><button id="new-conversation" class="icon-button" type="button" aria-label="گفتگوی تازه" title="گفتگوی تازه">＋</button></div>
+          <nav id="conversation-list" class="conversation-list" aria-label="فهرست گفتگوها"></nav>
+          <section class="documents-section" aria-labelledby="documents-heading">
+            <div class="sidebar-heading"><h2 id="documents-heading">اسناد</h2><label class="icon-button upload-trigger" for="pdf-file" title="بارگذاری PDF" aria-label="بارگذاری PDF">＋</label></div>
+            <input id="pdf-file" class="visually-hidden" type="file" accept="application/pdf">
+            <label class="upload-label" for="pdf-file">بارگذاری فایل PDF</label>
+            <div id="document-list" class="document-list"></div>
+            <p id="document-hint" class="small muted">اسناد فعال گفتگو برای پاسخ‌گویی استفاده می‌شوند.</p>
+          </section>
+        </aside>
+
+        <section class="main-panel" aria-label="گفتگوی اسناد">
+          <div id="welcome" class="welcome-state">
+            <div class="welcome-icon" aria-hidden="true">✦</div>
+            <p class="eyebrow">پرسش از اسناد</p>
+            <h1>از سند خود بپرسید</h1>
+            <p class="muted">پاسخ‌ها بر پایه متن بازیابی‌شده ساخته می‌شوند و همراه با ارجاع نمایش داده می‌شوند.</p>
+            <button id="welcome-new" class="primary" type="button">شروع گفتگوی تازه</button>
+          </div>
+          <div id="conversation-view" class="conversation-view" hidden>
+            <div class="conversation-title-row">
+              <h1 id="active-title">گفتگو</h1>
+              <button id="older-messages" class="quiet-button" type="button" hidden>پیام‌های قدیمی‌تر</button>
+            </div>
+            <div id="message-list" class="message-list" aria-live="polite" aria-relevant="additions text"></div>
+            <p id="chat-notice" class="notice" role="status" hidden></p>
+            <form id="chat-form" class="composer">
+              <label class="visually-hidden" for="question-input">پرسش شما</label>
+              <textarea id="question-input" rows="1" maxlength="10000" placeholder="پرسش خود را درباره اسناد بنویسید…" required></textarea>
+              <button class="primary send-button" type="submit" aria-label="ارسال پرسش">ارسال</button>
+            </form>
+            <p class="composer-hint">پاسخ‌ها ممکن است ناقص باشند؛ ارجاع‌ها را بررسی کنید.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </body>
+</html>

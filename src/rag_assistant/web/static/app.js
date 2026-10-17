@@ -1,0 +1,312 @@
+(() => {
+  "use strict";
+
+  const API = "/api/v1";
+  const el = (id) => document.getElementById(id);
+  const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login" };
+  const unsafeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+  function csrfToken() {
+    const entry = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("rag_csrf_token="));
+    return entry ? decodeURIComponent(entry.slice("rag_csrf_token=".length)) : "";
+  }
+
+  async function api(path, options = {}, retried = false) {
+    const method = (options.method || "GET").toUpperCase();
+    const headers = new Headers(options.headers || {});
+    if (unsafeMethods.has(method)) {
+      const token = csrfToken();
+      if (token) headers.set("X-CSRF-Token", token);
+    }
+    const response = await fetch(`${API}${path}`, { ...options, method, headers, credentials: "same-origin" });
+    if (response.status === 401 && !retried && !path.startsWith("/auth/")) {
+      try {
+        const refreshed = await fetch(`${API}/auth/refresh`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } });
+        if (refreshed.ok) return api(path, options, true);
+      } catch (_) { /* Expired session is handled below. */ }
+      showAuth();
+      throw new Error("نشست شما پایان یافته است. دوباره وارد شوید.");
+    }
+    if (response.status === 401) {
+      showAuth();
+      throw new Error("برای ادامه دوباره وارد شوید.");
+    }
+    if (!response.ok) {
+      let detail = `خطای درخواست (${response.status})`;
+      let payload = null;
+      try { const body = await response.json(); payload = body.detail; detail = typeof body.detail === "string" ? body.detail : body.detail?.error_message || body.detail?.detail || detail; } catch (_) { /* Keep generic message. */ }
+      const error = new Error(detail);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    if (response.status === 204) return null;
+    const type = response.headers.get("content-type") || "";
+    return type.includes("application/json") ? response.json() : response;
+  }
+
+  function showAuth(message = "") {
+    clearInterval(state.polling);
+    state.polling = null;
+    el("app-view").hidden = true;
+    el("auth-view").hidden = false;
+    el("auth-error").textContent = message;
+    el("auth-error").hidden = !message;
+    el("auth-email").focus();
+  }
+
+  function showApp() {
+    el("auth-view").hidden = true;
+    el("app-view").hidden = false;
+  }
+
+  function announce(message, kind = "") {
+    const box = el("chat-notice");
+    box.textContent = message;
+    box.className = `notice ${kind}`.trim();
+    box.hidden = !message;
+  }
+
+  function text(tag, value, className) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    node.textContent = value == null ? "" : String(value);
+    return node;
+  }
+
+  function appendAnswerText(node, value) {
+    const source = String(value || "");
+    const markers = /\[\s*\d+(?:\s*,\s*\d+)*\s*\]/g;
+    let offset = 0;
+    for (const match of source.matchAll(markers)) {
+      const index = match.index ?? offset;
+      node.append(document.createTextNode(source.slice(offset, index)));
+      const marker = document.createElement("bdi");
+      marker.dir = "ltr";
+      marker.textContent = match[0];
+      node.append(marker);
+      offset = index + match[0].length;
+    }
+    node.append(document.createTextNode(source.slice(offset)));
+  }
+
+  function latestVersion(document) { return (document.versions || []).reduce((latest, item) => !latest || item.version_number > latest.version_number ? item : latest, null); }
+  function statusLabel(version) {
+    if (!version) return ["بدون نسخه", ""];
+    const labels = { pending: ["در صف پردازش", "processing"], processing: ["در حال پردازش", "processing"], active: ["آماده استفاده", "ready"], failed: ["پردازش ناموفق", "failed"] };
+    return labels[version.status] || [version.status, ""];
+  }
+
+  async function loadDocuments() {
+    const result = await api("/documents/available");
+    state.documents = result.items || [];
+    renderDocuments();
+    updatePolling();
+  }
+
+  function renderDocuments() {
+    const list = el("document-list");
+    list.replaceChildren();
+    for (const doc of state.documents) {
+      const card = document.createElement("div"); card.className = "document-card";
+      const line = document.createElement("div"); line.className = "document-line";
+      const check = document.createElement("input"); check.type = "checkbox"; check.id = `doc-${doc.id}`;
+      check.checked = state.selected.has(doc.id);
+      const version = latestVersion(doc); const ready = Boolean(doc.active_version_id);
+      check.disabled = !ready || !state.current;
+      check.setAttribute("aria-label", `انتخاب سند ${doc.title}`);
+      check.addEventListener("change", () => toggleDocument(doc.id, check.checked));
+      const title = text("label", doc.title, "document-title"); title.htmlFor = check.id;
+      line.append(check, title); card.append(line);
+      const [label, stateClass] = ready ? ["آماده استفاده", "ready"] : statusLabel(version);
+      card.append(text("span", label, `document-status ${stateClass}`));
+      if (version?.status === "failed" && !doc.active_version_id) {
+        if (version.failure_message) card.append(text("span", version.failure_message, "document-status failed"));
+        const retry = text("button", "تلاش دوباره", "retry-button"); retry.type = "button";
+        retry.addEventListener("click", () => retryVersion(doc, version)); card.append(retry);
+      }
+      list.append(card);
+    }
+    el("document-hint").textContent = state.documents.length ? "برای جست‌وجو، اسناد آماده را به گفتگو اضافه کنید." : "هنوز سندی بارگذاری نشده است.";
+  }
+
+  function updatePolling() {
+    const pending = state.documents.some((doc) => ["pending", "processing"].includes(latestVersion(doc)?.status));
+    if (pending && !state.polling) state.polling = setInterval(() => loadDocuments().catch(() => {}), 2500);
+    if (!pending && state.polling) { clearInterval(state.polling); state.polling = null; }
+  }
+
+  async function toggleDocument(id, checked) {
+    if (checked) state.selected.add(id); else state.selected.delete(id);
+    try {
+      const docs = await api(`/conversations/${state.current.id}/documents`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ document_ids: [...state.selected] }) });
+      state.selected = new Set(docs.map((doc) => doc.id));
+      renderDocuments();
+    } catch (error) { announce(error.message, "error"); await loadCurrent(); }
+  }
+
+  async function loadConversations() {
+    const page = await api("/conversations?limit=100"); state.conversations = page.items || []; renderConversations();
+  }
+
+  function renderConversations() {
+    const list = el("conversation-list"); list.replaceChildren();
+    for (const conversation of state.conversations) {
+      const button = text("button", conversation.title || "گفتگوی تازه", `conversation-item${state.current?.id === conversation.id ? " active" : ""}`);
+      button.type = "button"; button.setAttribute("aria-current", state.current?.id === conversation.id ? "page" : "false");
+      button.addEventListener("click", () => openConversation(conversation.id)); list.append(button);
+    }
+  }
+
+  async function createConversation() {
+    const conversation = await api("/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    state.conversations.unshift(conversation); await openConversation(conversation.id);
+  }
+
+  async function openConversation(id) {
+    state.current = await api(`/conversations/${id}`);
+    state.selected = new Set(state.current.selected_documents.map((doc) => doc.id));
+    state.cursor = null; state.retry = null;
+    el("welcome").hidden = true; el("conversation-view").hidden = false;
+    el("active-title").textContent = state.current.title || "گفتگوی تازه";
+    el("message-list").replaceChildren(); announce("");
+    await loadHistory(false); renderConversations(); renderDocuments();
+    closeSidebar(); el("question-input").focus();
+  }
+
+  async function loadCurrent() {
+    if (state.current) {
+      state.current = await api(`/conversations/${state.current.id}`);
+      state.selected = new Set(state.current.selected_documents.map((doc) => doc.id)); renderDocuments();
+    }
+  }
+
+  async function loadHistory(older) {
+    if (!state.current) return;
+    const query = new URLSearchParams({ limit: "50" }); if (older && state.cursor) query.set("cursor", state.cursor);
+    const page = await api(`/conversations/${state.current.id}/messages?${query}`);
+    state.cursor = page.next_cursor; el("older-messages").hidden = !state.cursor;
+    const chronological = [...(page.items || [])].reverse();
+    const target = el("message-list");
+    if (older) {
+      const beforeHeight = target.scrollHeight;
+      const fragment = document.createDocumentFragment(); chronological.forEach((message) => fragment.append(renderMessage(message)));
+      target.prepend(fragment); target.scrollTop = target.scrollHeight - beforeHeight;
+    } else {
+      const fragment = document.createDocumentFragment(); chronological.forEach((message) => fragment.append(renderMessage(message)));
+      target.append(fragment); target.scrollTop = target.scrollHeight;
+    }
+  }
+
+  function renderMessage(message) {
+    const bubble = document.createElement("article"); bubble.className = `message ${message.role === "user" ? "user" : "assistant"}`;
+    bubble.append(text("div", message.role === "user" ? "شما" : "دستیار", "message-label"));
+    if (message.execution_status === "failed") {
+      const failure = document.createElement("div"); failure.className = "failure-card";
+      failure.append(text("strong", "اجرای پاسخ ناموفق بود"));
+      failure.append(text("span", message.error_message || "بازیابی یا تولید پاسخ با خطا روبه‌رو شد. این وضعیت با کمبود شواهد متفاوت است."));
+      bubble.append(failure); return bubble;
+    }
+    const outcome = message.answer_outcome;
+    if (outcome) {
+      const labels = { fully_answered: "پاسخ بر پایه شواهد", partially_answered: "پاسخ نسبی · بخشی از پرسش بی‌پاسخ است", abstained: "شواهد کافی پیدا نشد" };
+      bubble.append(text("span", labels[outcome] || outcome, `outcome${outcome === "partially_answered" ? " partial" : outcome === "abstained" ? " abstained" : ""}`));
+    }
+    const content = text("div", "", "message-content");
+    appendAnswerText(content, message.content || (message.execution_status === "pending" ? "در حال آماده‌سازی پاسخ…" : ""));
+    bubble.append(content);
+    if (message.citations?.length) {
+      const citations = document.createElement("div"); citations.className = "citation-list";
+      message.citations.forEach((citation, index) => {
+        const details = document.createElement("details"); details.className = "citation";
+        const summary = text("summary", `[${index + 1}] ${citation.document_title} · صفحه ${citation.page_number} · بند ${citation.paragraph_number}`);
+        const body = document.createElement("div"); body.className = "citation-body";
+        body.append(text("div", `صفحه فیزیکی ${citation.page_number} · بند ${citation.paragraph_number}`, "citation-meta"));
+        body.append(text("div", citation.original_text)); details.append(summary, body); citations.append(details);
+      }); bubble.append(citations);
+    }
+    return bubble;
+  }
+
+  async function submitQuestion(question, idempotencyKey = crypto.randomUUID(), failedBubble = null) {
+    const target = el("message-list");
+    const waiting = renderMessage({ role: "assistant", execution_status: "pending" });
+    if (failedBubble) failedBubble.replaceWith(waiting);
+    else {
+      target.append(renderMessage({ role: "user", content: question }));
+      target.append(waiting);
+    }
+    target.scrollTop = target.scrollHeight;
+    const submit = el("chat-form").querySelector("button[type=submit]"); submit.disabled = true;
+    try {
+      const answer = await api(`/conversations/${state.current.id}/messages`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ content: question }) });
+      waiting.replaceWith(renderMessage(answer)); state.retry = null; announce("");
+    } catch (error) {
+      state.retry = { question, idempotencyKey };
+      const pending = error.payload?.execution_status === "pending";
+      const failure = pending
+        ? renderMessage({ role: "assistant", execution_status: "pending", content: "پاسخ هنوز در حال اجراست. برای دریافت نتیجه دوباره بررسی کنید." })
+        : renderMessage(error.payload?.execution_status === "failed" ? error.payload : { role: "assistant", execution_status: "failed", error_message: error.message });
+      waiting.replaceWith(failure);
+      const retry = text("button", pending ? "بررسی دوباره همین پرسش" : "تلاش دوباره برای همین پرسش", "retry-button"); retry.type = "button"; retry.addEventListener("click", () => submitQuestion(state.retry.question, state.retry.idempotencyKey, failure)); failure.append(retry);
+      announce(pending ? "درخواست هنوز در حال اجراست؛ بررسی دوباره از همان شناسه درخواست استفاده می‌کند." : "اجرای پاسخ کامل نشد. در صورت تلاش دوباره، همان کلید درخواست استفاده می‌شود.", pending ? "" : "error");
+    } finally { submit.disabled = false; target.scrollTop = target.scrollHeight; }
+  }
+
+  async function uploadPdf(file) {
+    const query = new URLSearchParams({ title: file.name.replace(/\.pdf$/i, "") || "سند تازه" });
+    await api(`/documents?${query}`, { method: "POST", headers: { "Content-Type": "application/pdf" }, body: file });
+    announce("فایل دریافت شد. پردازش آن به‌صورت خودکار پیگیری می‌شود.", "success"); await loadDocuments();
+  }
+
+  async function retryVersion(doc, version) {
+    try { await api(`/documents/${doc.id}/versions/${version.id}/retry`, { method: "POST" }); announce("درخواست پردازش دوباره ثبت شد.", "success"); await loadDocuments(); }
+    catch (error) { announce(error.message, "error"); }
+  }
+
+  function closeSidebar() { el("sidebar").classList.remove("open"); el("menu-toggle").setAttribute("aria-expanded", "false"); }
+
+  el("auth-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    const button = el("auth-submit"); button.disabled = true;
+    try {
+      const mode = state.authMode === "register" ? "register" : "login";
+      state.user = await api(`/auth/${mode}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: form.get("email"), password: form.get("password") }) });
+      await startApp();
+    } catch (error) { el("auth-error").textContent = error.message; el("auth-error").hidden = false; }
+    finally { button.disabled = false; }
+  });
+  document.querySelectorAll("[data-auth-mode]").forEach((button) => button.addEventListener("click", () => {
+    state.authMode = button.dataset.authMode; document.querySelectorAll("[data-auth-mode]").forEach((item) => item.classList.toggle("active", item === button));
+    el("auth-title").textContent = state.authMode === "register" ? "حساب تازه بسازید" : "به فضای گفت‌وگو خوش آمدید";
+    el("auth-submit").textContent = state.authMode === "register" ? "ساخت حساب" : "ورود";
+    el("auth-password").autocomplete = state.authMode === "register" ? "new-password" : "current-password";
+  }));
+  el("logout-button").addEventListener("click", async () => { try { await api("/auth/logout", { method: "POST" }); } catch (_) { /* Clear the interface even when the session expired. */ } state.user = null; showAuth(); });
+  el("new-conversation").addEventListener("click", () => createConversation().catch((error) => announce(error.message, "error")));
+  el("welcome-new").addEventListener("click", () => createConversation().catch((error) => announce(error.message, "error")));
+  el("older-messages").addEventListener("click", () => loadHistory(true).catch((error) => announce(error.message, "error")));
+  el("chat-form").addEventListener("submit", (event) => {
+    event.preventDefault(); const input = el("question-input"); const question = input.value.trim();
+    if (!question || !state.current) return;
+    input.value = ""; submitQuestion(question).catch((error) => announce(error.message, "error"));
+  });
+  el("pdf-file").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0]; if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { announce("فقط فایل PDF پذیرفته می‌شود.", "error"); event.target.value = ""; return; }
+    try { await uploadPdf(file); } catch (error) { announce(error.message, "error"); } finally { event.target.value = ""; }
+  });
+  el("menu-toggle").addEventListener("click", () => { const open = el("sidebar").classList.toggle("open"); el("menu-toggle").setAttribute("aria-expanded", String(open)); });
+
+  async function startApp() {
+    showApp(); el("user-email").textContent = state.user?.email || "";
+    await Promise.all([loadConversations(), loadDocuments()]); await loadCurrent();
+    if (state.conversations.length) await openConversation(state.conversations[0].id);
+    else { el("conversation-view").hidden = true; el("welcome").hidden = false; }
+  }
+
+  (async function restoreSession() {
+    try { state.user = await api("/auth/me"); await startApp(); }
+    catch (_) { showAuth(); }
+  })();
+})();

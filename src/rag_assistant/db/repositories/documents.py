@@ -167,6 +167,7 @@ class DocumentRepository:
     async def list_accessible(self, *, user_id: UUID) -> list[Document]:
         documents = await self._session.scalars(
             select(Document)
+            .options(selectinload(Document.versions))
             .where(
                 or_(Document.owner_id == user_id, Document.is_shared.is_(True)),
                 Document.deleted_at.is_(None),
