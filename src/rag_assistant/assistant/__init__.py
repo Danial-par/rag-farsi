@@ -11,6 +11,7 @@ from rag_assistant.assistant.models import (
     AnswerCandidate,
     ConversationContext,
     ConversationHistoryMessage,
+    ExecutionRecord,
     RAGGraphInput,
     RAGGraphOutput,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ConversationContext",
     "ConversationHistoryMessage",
     "EvidenceRetriever",
+    "ExecutionRecord",
     "EvidenceAnswerValidator",
     "LangfuseNodeObserver",
     "NoopNodeObserver",

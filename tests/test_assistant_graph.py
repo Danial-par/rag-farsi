@@ -83,9 +83,14 @@ class FakePersistence:
         return ConversationContext(history=self.context.history[-history_limit:])
 
     async def create_execution(
-        self, *, user_id: UUID, conversation_id: UUID, question: str
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        question: str,
+        idempotency_key: str,
     ) -> ExecutionRecord:
-        del user_id, conversation_id
+        del user_id, conversation_id, idempotency_key
         self.created_questions.append(question)
         execution = ExecutionRecord(user_message_id=uuid4(), assistant_message_id=uuid4())
         self._executions.append(execution)
@@ -359,7 +364,7 @@ async def test_graph_state_does_not_leak_between_invocations() -> None:
     )
     retriever.result = _evidence(second_source)
     generator.answer = AnswerCandidate(
-        content="پاسخ دوم",
+        content="پاسخ دوم\n\nبخش پشتیبانی‌نشده: مقدار ذکرنشده",
         outcome=AnswerOutcome.PARTIALLY_ANSWERED,
         cited_paragraph_ids=(second_source,),
         unsupported_content="مقدار ذکرنشده",
@@ -370,7 +375,10 @@ async def test_graph_state_does_not_leak_between_invocations() -> None:
 
     assert first.assistant_message_id != second.assistant_message_id
     assert [request.question for request in retriever.requests] == ["پرسش اول", "پرسش دوم"]
-    assert [answer.content for answer in persistence.completed_answers] == ["پاسخ اول", "پاسخ دوم"]
+    assert [answer.content for answer in persistence.completed_answers] == [
+        "پاسخ اول",
+        "پاسخ دوم\n\nبخش پشتیبانی‌نشده: مقدار ذکرنشده",
+    ]
 
 
 async def test_sqlalchemy_persistence_commits_request_and_terminal_messages(
@@ -404,6 +412,7 @@ async def test_sqlalchemy_persistence_commits_request_and_terminal_messages(
         user_id=user.id,
         conversation_id=conversation.id,
         question="پرسش جدید",
+        idempotency_key="history-context",
     )
     output = await persistence.complete_execution(
         user_id=user.id,

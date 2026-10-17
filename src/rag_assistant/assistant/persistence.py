@@ -42,22 +42,24 @@ class SqlAlchemyWorkflowPersistence:
             return ConversationContext(history=history[-history_limit:])
 
     async def create_execution(
-        self, *, user_id: UUID, conversation_id: UUID, question: str
+        self, *, user_id: UUID, conversation_id: UUID, question: str, idempotency_key: str
     ) -> ExecutionRecord:
         async with self._session_factory.begin() as session:
             repository = ConversationRepository(session)
-            user_message = await repository.append_user_message(
+            (
+                user_message_id,
+                assistant_message_id,
+                existing_output,
+            ) = await repository.create_execution(
                 owner_id=user_id,
                 conversation_id=conversation_id,
-                content=question,
-            )
-            assistant_message = await repository.create_pending_assistant_message(
-                owner_id=user_id,
-                conversation_id=conversation_id,
+                question=question,
+                idempotency_key=idempotency_key,
             )
             return ExecutionRecord(
-                user_message_id=user_message.id,
-                assistant_message_id=assistant_message.id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                existing_output=existing_output,
             )
 
     async def complete_execution(
@@ -79,6 +81,7 @@ class SqlAlchemyWorkflowPersistence:
                 outcome=message.answer_outcome,
                 content=message.content,
                 citation_snapshot=tuple(message.citation_snapshot),
+                created_at=message.created_at,
             )
 
     async def fail_execution(
@@ -101,4 +104,5 @@ class SqlAlchemyWorkflowPersistence:
                 status=message.status,
                 error_code=message.error_code,
                 error_message=message.error_message,
+                created_at=message.created_at,
             )

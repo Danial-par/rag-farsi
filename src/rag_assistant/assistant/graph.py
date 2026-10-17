@@ -20,6 +20,7 @@ from rag_assistant.assistant.models import (
 )
 from rag_assistant.assistant.ports import RAGDependencies
 from rag_assistant.db.models import AnswerOutcome, MessageStatus
+from rag_assistant.db.repositories.conversations import IdempotencyConflictError
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
 from rag_assistant.retrieval.errors import RetrievalError
 
@@ -39,6 +40,7 @@ class RAGState(TypedDict):
     user_id: UUID
     conversation_id: UUID
     question: str
+    idempotency_key: str
     context: NotRequired[ConversationContext]
     execution: NotRequired[ExecutionRecord]
     prepared_question: NotRequired[str]
@@ -69,6 +71,7 @@ class RAGWorkflow:
                     "user_id": graph_input.user_id,
                     "conversation_id": graph_input.conversation_id,
                     "question": graph_input.question,
+                    "idempotency_key": graph_input.idempotency_key,
                 }
             ),
         )
@@ -109,6 +112,8 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     ) -> NodeResult:
         try:
             return await action()
+        except IdempotencyConflictError:
+            raise
         except Exception as exc:
             return {"failure": _classify_failure(node_name, exc)}
 
@@ -136,8 +141,11 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
                 user_id=state["user_id"],
                 conversation_id=state["conversation_id"],
                 question=state["question"],
+                idempotency_key=state["idempotency_key"],
             )
             result: NodeResult = {"execution": execution}
+            if execution.existing_output is not None:
+                result["output"] = RAGGraphOutput.model_validate(execution.existing_output)
             state_with_execution = {**state, "execution": execution}
             await record_node(
                 cast(RAGState, state_with_execution),
@@ -235,11 +243,14 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     async def validate_answer(state: RAGState) -> NodeResult:
         async def action() -> NodeResult:
             candidate = state["candidate"]
-            validated_answer = await dependencies.validator.validate(
-                question=state["prepared_question"],
-                evidence=state["evidence"],
-                candidate=candidate,
-            )
+            if candidate.outcome is AnswerOutcome.ABSTAINED:
+                validated_answer = candidate
+            else:
+                validated_answer = await dependencies.validator.validate(
+                    question=state["prepared_question"],
+                    evidence=state["evidence"],
+                    candidate=candidate,
+                )
             _enforce_evidence_binding(validated_answer, state["evidence"])
             await record_node(
                 state,
@@ -306,7 +317,7 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     )
     graph.add_conditional_edges(
         "create_execution",
-        _route_after_initialization,
+        _route_after_execution_creation,
         {"continue": "prepare_question", "stop": END},
     )
     graph.add_conditional_edges(
@@ -354,6 +365,10 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
 
 def _route_after_initialization(state: RAGState) -> str:
     return "stop" if "failure" in state else "continue"
+
+
+def _route_after_execution_creation(state: RAGState) -> str:
+    return "stop" if "failure" in state or "output" in state else "continue"
 
 
 def _route_after_execution(state: RAGState) -> str:

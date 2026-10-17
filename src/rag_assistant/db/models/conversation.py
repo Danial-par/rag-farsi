@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -109,6 +110,13 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base):
             name="message_state_valid",
         ),
         Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+        Index(
+            "uq_messages_user_idempotency_key",
+            "conversation_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("role = 'user' AND idempotency_key IS NOT NULL"),
+        ),
     )
 
     conversation_id: Mapped[UUID] = mapped_column(
@@ -145,6 +153,7 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base):
         nullable=True,
     )
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     citation_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(

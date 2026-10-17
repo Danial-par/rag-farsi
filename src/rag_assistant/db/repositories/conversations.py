@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -26,11 +27,182 @@ from rag_assistant.db.repositories.errors import (
 )
 
 
+class IdempotencyConflictError(RuntimeError):
+    """A request key was reused for a different question."""
+
+
 class ConversationRepository:
     """Owned conversation operations, including immutable assistant outcomes."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def create_execution(
+        self,
+        *,
+        owner_id: UUID,
+        conversation_id: UUID,
+        question: str,
+        idempotency_key: str,
+    ) -> tuple[UUID, UUID, dict[str, Any] | None]:
+        if not question.strip():
+            raise InvalidPersistenceStateError("User message content cannot be blank")
+        conversation = await self._locked_owned_conversation(owner_id, conversation_id)
+        existing = await self._session.scalar(
+            select(Message).where(
+                Message.conversation_id == conversation.id,
+                Message.role == MessageRole.USER,
+                Message.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            if existing.content != question:
+                raise IdempotencyConflictError("Idempotency key was used with another question")
+            assistant = await self._session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == conversation.id,
+                    Message.role == MessageRole.ASSISTANT,
+                    Message.idempotency_key == idempotency_key,
+                )
+                .order_by(Message.created_at, Message.id)
+            )
+            if assistant is None:
+                raise InvalidPersistenceStateError("Idempotent assistant message is missing")
+            return (
+                existing.id,
+                assistant.id,
+                {
+                    "assistant_message_id": str(assistant.id),
+                    "status": assistant.status.value,
+                    "outcome": assistant.answer_outcome.value
+                    if assistant.answer_outcome is not None
+                    else None,
+                    "content": assistant.content,
+                    "citation_snapshot": assistant.citation_snapshot,
+                    "error_code": assistant.error_code,
+                    "error_message": assistant.error_message,
+                    "created_at": assistant.created_at.isoformat(),
+                },
+            )
+
+        user_message = Message(
+            conversation_id=conversation.id,
+            role=MessageRole.USER,
+            status=MessageStatus.COMPLETED,
+            content=question,
+            idempotency_key=idempotency_key,
+            citation_snapshot=[],
+            model_usage={},
+            provider_metadata={},
+        )
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role=MessageRole.ASSISTANT,
+            status=MessageStatus.PENDING,
+            content=None,
+            idempotency_key=idempotency_key,
+            citation_snapshot=[],
+            model_usage={},
+            provider_metadata={},
+        )
+        conversation.updated_at = utc_now()
+        self._session.add_all((user_message, assistant_message))
+        await self._session.flush()
+        return user_message.id, assistant_message.id, None
+
+    async def replace_documents(
+        self, *, owner_id: UUID, conversation_id: UUID, document_ids: Sequence[UUID]
+    ) -> list[Document]:
+        conversation = await self._locked_owned_conversation(owner_id, conversation_id)
+        unique_ids = set(document_ids)
+        documents = []
+        if unique_ids:
+            documents = list(
+                await self._session.scalars(
+                    select(Document).where(
+                        Document.id.in_(unique_ids),
+                        ((Document.owner_id == owner_id) | Document.is_shared.is_(True)),
+                        Document.deleted_at.is_(None),
+                        Document.active_version_id.is_not(None),
+                    )
+                )
+            )
+        if {document.id for document in documents} != unique_ids:
+            raise RecordNotFoundError("Accessible active documents not found")
+        defaults = set(
+            await self._session.scalars(
+                select(Document.id).where(
+                    Document.is_shared.is_(True),
+                    Document.is_default.is_(True),
+                    Document.active_version_id.is_not(None),
+                    Document.deleted_at.is_(None),
+                )
+            )
+        )
+        retained_ids = unique_ids | defaults
+        links = list(
+            await self._session.scalars(
+                select(ConversationDocument).where(
+                    ConversationDocument.conversation_id == conversation.id
+                )
+            )
+        )
+        for link in links:
+            if link.document_id not in retained_ids:
+                await self._session.delete(link)
+        existing_ids = {link.document_id for link in links}
+        self._session.add_all(
+            ConversationDocument(conversation_id=conversation.id, document_id=document_id)
+            for document_id in retained_ids - existing_ids
+        )
+        await self._session.flush()
+        selected = await self.list_active_documents(
+            owner_id=owner_id, conversation_id=conversation_id
+        )
+        return selected
+
+    async def list_owned(
+        self, *, owner_id: UUID, limit: int, before: tuple[datetime, UUID] | None
+    ) -> list[Conversation]:
+        statement = select(Conversation).where(
+            Conversation.owner_id == owner_id,
+            Conversation.deleted_at.is_(None),
+        )
+        if before is not None:
+            statement = statement.where(
+                or_(
+                    Conversation.updated_at < before[0],
+                    and_(Conversation.updated_at == before[0], Conversation.id < before[1]),
+                )
+            )
+        rows = await self._session.scalars(
+            statement.order_by(Conversation.updated_at.desc(), Conversation.id.desc()).limit(limit)
+        )
+        return list(rows)
+
+    async def list_messages(
+        self,
+        *,
+        owner_id: UUID,
+        conversation_id: UUID,
+        limit: int,
+        before: tuple[datetime, UUID] | None,
+    ) -> list[Message] | None:
+        if await self.get_owned(owner_id=owner_id, conversation_id=conversation_id) is None:
+            return None
+        statement = select(Message).where(Message.conversation_id == conversation_id)
+        if before is not None:
+            statement = statement.where(
+                or_(
+                    Message.created_at < before[0],
+                    and_(Message.created_at == before[0], Message.id < before[1]),
+                )
+            )
+        rows = await self._session.scalars(
+            statement.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)
+        )
+        return list(rows)
 
     async def create(
         self,

@@ -57,7 +57,7 @@ class WorkflowPersistence(Protocol):
     ) -> ConversationContext: ...
 
     async def create_execution(
-        self, *, user_id: UUID, conversation_id: UUID, question: str
+        self, *, user_id: UUID, conversation_id: UUID, question: str, idempotency_key: str
     ) -> ExecutionRecord: ...
 
     async def complete_execution(

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -18,6 +19,7 @@ class RAGGraphInput(BaseModel):
     user_id: UUID
     conversation_id: UUID
     question: str = Field(max_length=10_000)
+    idempotency_key: str = Field(default_factory=lambda: uuid4().hex, min_length=1, max_length=128)
 
     @field_validator("question")
     @classmethod
@@ -51,6 +53,7 @@ class ExecutionRecord(BaseModel):
 
     user_message_id: UUID
     assistant_message_id: UUID
+    existing_output: dict[str, Any] | None = None
 
 
 class AnswerCandidate(BaseModel):
@@ -78,6 +81,7 @@ class RAGGraphOutput(BaseModel):
     citation_snapshot: tuple[dict[str, Any], ...] = ()
     error_code: str | None = None
     error_message: str | None = None
+    created_at: datetime | None = None
 
 
 class WorkflowFailure(BaseModel):

@@ -86,6 +86,10 @@
 - Normalized chunk-to-paragraph rows are authoritative provenance. Chunks also retain a JSONB provenance snapshot, and completed assistant messages retain immutable validated citation snapshots.
 - Store execution status separately from answer outcome on assistant messages.
 - Run the RAG graph statelessly per request without checkpointing or graph-level retries. After conversation authorization, atomically create and commit the user message plus pending assistant message; terminal completion or failure is persisted separately.
+- Require an `Idempotency-Key` for chat message creation, scoped to the conversation and authenticated owner; retries return the original assistant result, and key reuse with a different question conflicts.
+- Conversation selection updates replace the explicit selection while retaining active shared default documents automatically. Conversation and message pagination uses descending creation or update timestamps with UUID tie-breakers and opaque cursors.
+- The chat API waits for the complete non-streaming workflow. Failed assistant executions return HTTP 503 with the persisted assistant-message identifier; execution status and answer outcome remain separate response fields.
+- API citations represent the complete immutable source paragraph and expose null offsets, including for paragraphs split across retrieval chunks.
 - Use at most the previous 12 completed messages as generation-only conversation context. Retrieve using the current question alone; an empty retrieval result must persist a citation-free abstention.
 - Authentication sessions are server-side revocation anchors referenced by JWT session claims; never store raw JWTs.
 - Public self-registration is enabled. Authentication uses HS256 with a dedicated environment secret, 15-minute access tokens, and rotating 30-day absolute refresh sessions.
