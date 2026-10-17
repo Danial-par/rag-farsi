@@ -65,3 +65,12 @@ def test_chunk_target_cannot_exceed_hard_maximum() -> None:
             chunk_target_tokens=601,
             chunk_max_tokens=600,
         )
+
+
+def test_langfuse_credentials_must_be_configured_together() -> None:
+    with pytest.raises(ValidationError, match="LANGFUSE_PUBLIC_KEY"):
+        Settings(
+            database_url="postgresql+psycopg://user:password@localhost/database",
+            jwt_secret=JWT_SECRET,
+            langfuse_public_key="pk-test",
+        )

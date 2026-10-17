@@ -37,6 +37,9 @@ class Settings(BaseSettings):
 
     openrouter_base_url: AnyHttpUrl = AnyHttpUrl("https://openrouter.ai/api/v1")
     openrouter_api_key: SecretStr | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: AnyHttpUrl = AnyHttpUrl("https://cloud.langfuse.com")
     embedding_model: str = "openai/text-embedding-3-large"
     embedding_dimensions: int = Field(default=1024, ge=1, le=4096)
     embedding_batch_size: int = Field(default=64, ge=1, le=512)
@@ -71,6 +74,8 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET must contain at least 32 bytes")
         if self.chunk_target_tokens > self.chunk_max_tokens:
             raise ValueError("CHUNK_TARGET_TOKENS cannot exceed CHUNK_MAX_TOKENS")
+        if (self.langfuse_public_key is None) != (self.langfuse_secret_key is None):
+            raise ValueError("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must be set together")
         return self
 
     @property

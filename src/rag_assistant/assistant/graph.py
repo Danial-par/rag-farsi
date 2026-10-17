@@ -1,0 +1,416 @@
+"""The stateless async LangGraph workflow for one grounded answer."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from typing import Any, NotRequired, TypedDict, cast
+from uuid import UUID
+
+from langfuse import observe
+from langgraph.graph import END, START, StateGraph
+
+from rag_assistant.assistant.errors import ConversationAuthorizationError, WorkflowExecutionError
+from rag_assistant.assistant.models import (
+    AnswerCandidate,
+    ConversationContext,
+    ExecutionRecord,
+    RAGGraphInput,
+    RAGGraphOutput,
+    WorkflowFailure,
+)
+from rag_assistant.assistant.ports import RAGDependencies
+from rag_assistant.db.models import AnswerOutcome, MessageStatus
+from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval.errors import RetrievalError
+
+HISTORY_MESSAGE_LIMIT = 12
+ABSTENTION_MESSAGE = "برای پاسخ به این پرسش، شواهد کافی در اسناد انتخاب‌شده پیدا نشد."
+
+
+class RAGState(TypedDict):
+    """Only request-scoped data moves between graph nodes."""
+
+    user_id: UUID
+    conversation_id: UUID
+    question: str
+    context: NotRequired[ConversationContext]
+    execution: NotRequired[ExecutionRecord]
+    prepared_question: NotRequired[str]
+    evidence: NotRequired[RetrievalResult]
+    evidence_sufficient: NotRequired[bool]
+    candidate: NotRequired[AnswerCandidate]
+    validated_answer: NotRequired[AnswerCandidate]
+    failure: NotRequired[WorkflowFailure]
+    output: NotRequired[RAGGraphOutput]
+
+
+NodeResult = dict[str, object]
+NodeAction = Callable[[], Awaitable[NodeResult]]
+
+
+class RAGWorkflow:
+    """Run a compiled graph without checkpoints or graph-level retries."""
+
+    def __init__(self, compiled_graph: Any) -> None:
+        self._compiled_graph = compiled_graph
+
+    async def ainvoke(self, graph_input: RAGGraphInput) -> RAGGraphOutput:
+        """Execute one request and return only a terminal persisted result."""
+        final_state = cast(
+            RAGState,
+            await self._compiled_graph.ainvoke(
+                {
+                    "user_id": graph_input.user_id,
+                    "conversation_id": graph_input.conversation_id,
+                    "question": graph_input.question,
+                }
+            ),
+        )
+        output = final_state.get("output")
+        if output is not None:
+            return output
+
+        failure = final_state.get("failure")
+        if failure is not None and failure.error_code == "conversation_authorization_failed":
+            raise ConversationAuthorizationError(failure.safe_message)
+        raise WorkflowExecutionError("The assistant execution did not reach a terminal state")
+
+
+def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
+    """Build the per-request graph around injected infrastructure dependencies."""
+
+    async def record_node(
+        state: RAGState,
+        *,
+        node_name: str,
+        extra: dict[str, str | int] | None = None,
+    ) -> None:
+        metadata: dict[str, str | int] = {
+            "conversation_id": str(state["conversation_id"]),
+        }
+        execution = state.get("execution")
+        if execution is not None:
+            metadata["assistant_message_id"] = str(execution.assistant_message_id)
+        if extra:
+            metadata.update(extra)
+        await dependencies.observer.record_node(node_name=node_name, metadata=metadata)
+
+    async def guarded(
+        state: RAGState,
+        *,
+        node_name: str,
+        action: NodeAction,
+    ) -> NodeResult:
+        try:
+            return await action()
+        except Exception as exc:
+            return {"failure": _classify_failure(node_name, exc)}
+
+    @observe(name="rag.load_conversation", capture_input=False, capture_output=False)
+    async def load_conversation(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            context = await dependencies.persistence.load_context(
+                user_id=state["user_id"],
+                conversation_id=state["conversation_id"],
+                history_limit=HISTORY_MESSAGE_LIMIT,
+            )
+            await record_node(
+                state,
+                node_name="load_conversation",
+                extra={"history_message_count": len(context.history)},
+            )
+            return {"context": context}
+
+        return await guarded(state, node_name="load_conversation", action=action)
+
+    @observe(name="rag.create_execution", capture_input=False, capture_output=False)
+    async def create_execution(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            execution = await dependencies.persistence.create_execution(
+                user_id=state["user_id"],
+                conversation_id=state["conversation_id"],
+                question=state["question"],
+            )
+            result: NodeResult = {"execution": execution}
+            state_with_execution = {**state, "execution": execution}
+            await record_node(
+                cast(RAGState, state_with_execution),
+                node_name="create_execution",
+            )
+            return result
+
+        return await guarded(state, node_name="create_execution", action=action)
+
+    @observe(name="rag.prepare_question", capture_input=False, capture_output=False)
+    async def prepare_question(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            prepared_question = state["question"]
+            await record_node(
+                state,
+                node_name="prepare_question",
+                extra={"question_character_count": len(prepared_question)},
+            )
+            return {"prepared_question": prepared_question}
+
+        return await guarded(state, node_name="prepare_question", action=action)
+
+    @observe(name="rag.retrieve_evidence", capture_input=False, capture_output=False)
+    async def retrieve_evidence(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            evidence = await dependencies.retriever.retrieve(
+                RetrievalRequest(
+                    user_id=state["user_id"],
+                    conversation_id=state["conversation_id"],
+                    question=state["prepared_question"],
+                )
+            )
+            await record_node(
+                state,
+                node_name="retrieve_evidence",
+                extra={"evidence_chunk_count": len(evidence.evidence)},
+            )
+            return {"evidence": evidence}
+
+        return await guarded(state, node_name="retrieve_evidence", action=action)
+
+    @observe(name="rag.assess_evidence", capture_input=False, capture_output=False)
+    async def assess_evidence(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            sufficient = bool(state["evidence"].evidence)
+            await record_node(
+                state,
+                node_name="assess_evidence",
+                extra={"evidence_sufficient": int(sufficient)},
+            )
+            return {"evidence_sufficient": sufficient}
+
+        return await guarded(state, node_name="assess_evidence", action=action)
+
+    @observe(name="rag.abstain", capture_input=False, capture_output=False)
+    async def abstain(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            candidate = AnswerCandidate(
+                content=ABSTENTION_MESSAGE,
+                outcome=AnswerOutcome.ABSTAINED,
+            )
+            await record_node(state, node_name="abstain")
+            return {"candidate": candidate}
+
+        return await guarded(state, node_name="abstain", action=action)
+
+    @observe(name="rag.generate_answer", capture_input=False, capture_output=False)
+    async def generate_answer(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            candidate = await dependencies.generator.generate(
+                question=state["prepared_question"],
+                history=state["context"].history,
+                evidence=state["evidence"],
+            )
+            await record_node(
+                state,
+                node_name="generate_answer",
+                extra={"candidate_citation_count": len(candidate.cited_paragraph_ids)},
+            )
+            return {"candidate": candidate}
+
+        return await guarded(state, node_name="generate_answer", action=action)
+
+    @observe(name="rag.validate_answer", capture_input=False, capture_output=False)
+    async def validate_answer(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            candidate = state["candidate"]
+            if candidate.outcome is AnswerOutcome.ABSTAINED:
+                validated_answer = candidate
+            else:
+                validated_answer = await dependencies.validator.validate(
+                    question=state["prepared_question"],
+                    evidence=state["evidence"],
+                    candidate=candidate,
+                )
+            _enforce_evidence_binding(validated_answer, state["evidence"])
+            await record_node(
+                state,
+                node_name="validate_answer",
+                extra={"validated_citation_count": len(validated_answer.cited_paragraph_ids)},
+            )
+            return {"validated_answer": validated_answer}
+
+        return await guarded(state, node_name="validate_answer", action=action)
+
+    @observe(name="rag.persist_completed", capture_input=False, capture_output=False)
+    async def persist_completed(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            output = await dependencies.persistence.complete_execution(
+                user_id=state["user_id"],
+                assistant_message_id=state["execution"].assistant_message_id,
+                answer=state["validated_answer"],
+            )
+            if output.status is not MessageStatus.COMPLETED:
+                raise WorkflowExecutionError("Persistence did not complete the assistant message")
+            await record_node(
+                state,
+                node_name="persist_completed",
+                extra={"citation_count": len(output.citation_snapshot)},
+            )
+            return {"output": output}
+
+        return await guarded(state, node_name="persist_completed", action=action)
+
+    @observe(name="rag.persist_failed", capture_input=False, capture_output=False)
+    async def persist_failed(state: RAGState) -> NodeResult:
+        failure = state["failure"]
+        output = await dependencies.persistence.fail_execution(
+            user_id=state["user_id"],
+            assistant_message_id=state["execution"].assistant_message_id,
+            error_code=failure.error_code,
+            error_message=failure.safe_message,
+        )
+        if output.status is not MessageStatus.FAILED:
+            raise WorkflowExecutionError("Persistence did not fail the assistant message")
+        await record_node(
+            state,
+            node_name="persist_failed",
+            extra={"failure_code": failure.error_code},
+        )
+        return {"output": output}
+
+    graph = StateGraph(RAGState)
+    graph.add_node("load_conversation", load_conversation)
+    graph.add_node("create_execution", create_execution)
+    graph.add_node("prepare_question", prepare_question)
+    graph.add_node("retrieve_evidence", retrieve_evidence)
+    graph.add_node("assess_evidence", assess_evidence)
+    graph.add_node("abstain", abstain)
+    graph.add_node("generate_answer", generate_answer)
+    graph.add_node("validate_answer", validate_answer)
+    graph.add_node("persist_completed", persist_completed)
+    graph.add_node("persist_failed", persist_failed)
+    graph.add_edge(START, "load_conversation")
+    graph.add_conditional_edges(
+        "load_conversation",
+        _route_after_initialization,
+        {"continue": "create_execution", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "create_execution",
+        _route_after_initialization,
+        {"continue": "prepare_question", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "prepare_question",
+        _route_after_execution,
+        {"continue": "retrieve_evidence", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "retrieve_evidence",
+        _route_after_execution,
+        {"continue": "assess_evidence", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "assess_evidence",
+        _route_after_assessment,
+        {
+            "abstain": "abstain",
+            "generate": "generate_answer",
+            "failed": "persist_failed",
+        },
+    )
+    graph.add_conditional_edges(
+        "abstain",
+        _route_after_execution,
+        {"continue": "validate_answer", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "generate_answer",
+        _route_after_execution,
+        {"continue": "validate_answer", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "validate_answer",
+        _route_after_execution,
+        {"continue": "persist_completed", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "persist_completed",
+        _route_after_terminal_persistence,
+        {"complete": END, "failed": "persist_failed"},
+    )
+    graph.add_edge("persist_failed", END)
+    return RAGWorkflow(graph.compile())
+
+
+def _route_after_initialization(state: RAGState) -> str:
+    return "stop" if "failure" in state else "continue"
+
+
+def _route_after_execution(state: RAGState) -> str:
+    return "failed" if "failure" in state else "continue"
+
+
+def _route_after_assessment(state: RAGState) -> str:
+    if "failure" in state:
+        return "failed"
+    return "generate" if state["evidence_sufficient"] else "abstain"
+
+
+def _route_after_terminal_persistence(state: RAGState) -> str:
+    return "failed" if "failure" in state else "complete"
+
+
+def _classify_failure(node_name: str, exc: Exception) -> WorkflowFailure:
+    if isinstance(exc, ConversationAuthorizationError):
+        return WorkflowFailure(
+            node_name=node_name,
+            error_code="conversation_authorization_failed",
+            safe_message="Conversation access could not be established.",
+        )
+    if isinstance(exc, RetrievalError):
+        return WorkflowFailure(
+            node_name=node_name,
+            error_code="retrieval_failed",
+            safe_message="Evidence retrieval could not be completed.",
+        )
+    if node_name == "retrieve_evidence":
+        return WorkflowFailure(
+            node_name=node_name,
+            error_code="retrieval_failed",
+            safe_message="Evidence retrieval could not be completed.",
+        )
+    if node_name == "generate_answer":
+        return WorkflowFailure(
+            node_name=node_name,
+            error_code="generation_failed",
+            safe_message="Answer generation could not be completed.",
+        )
+    if node_name == "validate_answer":
+        return WorkflowFailure(
+            node_name=node_name,
+            error_code="validation_failed",
+            safe_message="The generated answer could not be validated.",
+        )
+    return WorkflowFailure(
+        node_name=node_name,
+        error_code="assistant_execution_failed",
+        safe_message="The assistant could not complete this request.",
+    )
+
+
+def _enforce_evidence_binding(answer: AnswerCandidate, evidence: RetrievalResult) -> None:
+    if not answer.content.strip():
+        raise ValueError("Validated answer content cannot be blank")
+    citation_ids = answer.cited_paragraph_ids
+    if len(set(citation_ids)) != len(citation_ids):
+        raise ValueError("Validated answer citation identifiers must be unique")
+    if answer.outcome is AnswerOutcome.ABSTAINED:
+        if citation_ids:
+            raise ValueError("Abstained answers cannot contain citations")
+        return
+    if not citation_ids:
+        raise ValueError("Supported answers require at least one citation")
+    retrieved_ids = {
+        source.source_paragraph_id
+        for chunk in evidence.evidence
+        for source in chunk.citation_sources
+    }
+    if not set(citation_ids).issubset(retrieved_ids):
+        raise ValueError("Validated answer cited evidence that was not retrieved")
