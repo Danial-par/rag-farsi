@@ -37,6 +37,10 @@ class Settings(BaseSettings):
 
     openrouter_base_url: AnyHttpUrl = AnyHttpUrl("https://openrouter.ai/api/v1")
     openrouter_api_key: SecretStr | None = None
+    chat_model: str = "openai/gpt-6-luna"
+    chat_connect_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    chat_read_timeout_seconds: float = Field(default=60, gt=0, le=600)
+    chat_max_retries: int = Field(default=2, ge=0, le=5)
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
     langfuse_base_url: AnyHttpUrl = AnyHttpUrl("https://cloud.langfuse.com")

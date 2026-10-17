@@ -362,6 +362,7 @@ async def test_graph_state_does_not_leak_between_invocations() -> None:
         content="پاسخ دوم",
         outcome=AnswerOutcome.PARTIALLY_ANSWERED,
         cited_paragraph_ids=(second_source,),
+        unsupported_content="مقدار ذکرنشده",
     )
     second = await workflow.ainvoke(
         RAGGraphInput(user_id=uuid4(), conversation_id=uuid4(), question="پرسش دوم")

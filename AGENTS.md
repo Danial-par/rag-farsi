@@ -37,6 +37,9 @@
 - For a partially supported question, answer only the supported portion with citations and explicitly identify the unsupported portion.
 - When no material answer is supported, explicitly abstain and return no citations.
 - Citations may reference only evidence supplied by retrieval and validated against stored source units.
+- Cite supported answer claims individually; the generator assesses evidence adequacy and may abstain even when retrieval is nonempty.
+- Use temporary evidence aliases for model-selected citations, resolve them server-side, and allow one bounded retry for malformed structured output.
+- Persist only allowlisted model and token-usage metadata; never persist raw provider payloads.
 
 ## Documents and models
 

@@ -24,7 +24,13 @@ from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
 from rag_assistant.retrieval.errors import RetrievalError
 
 HISTORY_MESSAGE_LIMIT = 12
-ABSTENTION_MESSAGE = "برای پاسخ به این پرسش، شواهد کافی در اسناد انتخاب‌شده پیدا نشد."
+
+
+def _abstention_message(question: str) -> str:
+    """Return a short citation-free abstention in Persian or English."""
+    if any("\u0600" <= character <= "\u06ff" for character in question):
+        return "برای پاسخ به این پرسش، شواهد کافی در اسناد انتخاب‌شده پیدا نشد."
+    return "I could not find enough evidence in the selected documents to answer this question."
 
 
 class RAGState(TypedDict):
@@ -190,7 +196,7 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     async def abstain(state: RAGState) -> NodeResult:
         async def action() -> NodeResult:
             candidate = AnswerCandidate(
-                content=ABSTENTION_MESSAGE,
+                content=_abstention_message(state["question"]),
                 outcome=AnswerOutcome.ABSTAINED,
             )
             await record_node(state, node_name="abstain")
@@ -206,10 +212,20 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
                 history=state["context"].history,
                 evidence=state["evidence"],
             )
+            usage_metadata = {
+                key: value
+                for key, value in candidate.model_usage.items()
+                if key in {"input_tokens", "output_tokens", "total_tokens"}
+                and isinstance(value, int)
+                and value >= 0
+            }
             await record_node(
                 state,
                 node_name="generate_answer",
-                extra={"candidate_citation_count": len(candidate.cited_paragraph_ids)},
+                extra={
+                    "candidate_citation_count": len(candidate.cited_paragraph_ids),
+                    **usage_metadata,
+                },
             )
             return {"candidate": candidate}
 
@@ -219,14 +235,11 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     async def validate_answer(state: RAGState) -> NodeResult:
         async def action() -> NodeResult:
             candidate = state["candidate"]
-            if candidate.outcome is AnswerOutcome.ABSTAINED:
-                validated_answer = candidate
-            else:
-                validated_answer = await dependencies.validator.validate(
-                    question=state["prepared_question"],
-                    evidence=state["evidence"],
-                    candidate=candidate,
-                )
+            validated_answer = await dependencies.validator.validate(
+                question=state["prepared_question"],
+                evidence=state["evidence"],
+                candidate=candidate,
+            )
             _enforce_evidence_binding(validated_answer, state["evidence"])
             await record_node(
                 state,
@@ -402,11 +415,23 @@ def _enforce_evidence_binding(answer: AnswerCandidate, evidence: RetrievalResult
     if len(set(citation_ids)) != len(citation_ids):
         raise ValueError("Validated answer citation identifiers must be unique")
     if answer.outcome is AnswerOutcome.ABSTAINED:
-        if citation_ids:
+        if citation_ids or answer.unsupported_content:
             raise ValueError("Abstained answers cannot contain citations")
         return
     if not citation_ids:
         raise ValueError("Supported answers require at least one citation")
+    if (
+        answer.outcome is AnswerOutcome.PARTIALLY_ANSWERED
+        and not (answer.unsupported_content or "").strip()
+    ):
+        raise ValueError("Partial answers must identify the unsupported portion")
+    if (
+        answer.outcome is AnswerOutcome.PARTIALLY_ANSWERED
+        and (answer.unsupported_content or "") not in answer.content
+    ):
+        raise ValueError("Partial answer content must state its unsupported portion")
+    if answer.outcome is AnswerOutcome.FULLY_ANSWERED and answer.unsupported_content:
+        raise ValueError("Fully answered results cannot contain unsupported portions")
     retrieved_ids = {
         source.source_paragraph_id
         for chunk in evidence.evidence

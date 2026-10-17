@@ -27,6 +27,7 @@ dependencies = [
     "structlog>=24.4,<27",
     "tiktoken>=0.9,<1",
     "uvicorn[standard]>=0.34,<1",
+    "langchain-openai>=1,<2",
 ]
 
 [project.scripts]

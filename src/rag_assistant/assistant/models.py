@@ -61,6 +61,7 @@ class AnswerCandidate(BaseModel):
     content: str
     outcome: AnswerOutcome
     cited_paragraph_ids: tuple[UUID, ...] = ()
+    unsupported_content: str | None = None
     model_usage: dict[str, Any] = Field(default_factory=dict)
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
