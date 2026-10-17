@@ -28,7 +28,8 @@ def test_configure_langfuse_passes_pydantic_settings_explicitly(
         {
             "public_key": "pk-test",
             "secret_key": "sk-test",
-            "base_url": "https://langfuse.example.test/",
+            "base_url": "https://langfuse.example.test",
+            "additional_headers": {"x-langfuse-ingestion-version": "4"},
         }
     ]
 

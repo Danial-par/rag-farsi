@@ -10,7 +10,7 @@ from typing import Any, NotRequired, TypedDict, cast
 from uuid import UUID
 
 import structlog
-from langfuse import get_client, observe
+from langfuse import get_client, observe, propagate_attributes
 from langgraph.graph import END, START, StateGraph
 
 from rag_assistant.assistant.errors import ConversationAuthorizationError, WorkflowExecutionError
@@ -78,7 +78,15 @@ class RAGWorkflow:
         if isinstance(request_id, str):
             trace_metadata["request_id"] = request_id
         client = get_client()
-        client.update_current_trace(input=graph_input.question, metadata=trace_metadata)
+        client.update_current_span(input=graph_input.question)
+        with propagate_attributes(metadata=trace_metadata):
+            return await self._execute_graph(graph_input, client)
+
+    async def _execute_graph(
+        self,
+        graph_input: RAGGraphInput,
+        client: Any,
+    ) -> RAGGraphOutput:
         heartbeat = asyncio.create_task(self._maintain_execution_lease(graph_input))
         try:
             final_state = cast(
@@ -98,10 +106,9 @@ class RAGWorkflow:
                 await heartbeat
         output = final_state.get("output")
         if output is not None:
-            client.update_current_trace(
+            client.update_current_span(
                 output=output.content,
                 metadata={
-                    **trace_metadata,
                     "assistant_message_id": str(output.assistant_message_id),
                     "execution_status": output.status.value,
                     "answer_outcome": output.outcome.value if output.outcome else "none",
@@ -112,14 +119,10 @@ class RAGWorkflow:
 
         failure = final_state.get("failure")
         if failure is not None and failure.error_code == "conversation_authorization_failed":
-            client.update_current_trace(
-                metadata={**trace_metadata, "error_code": failure.error_code}
-            )
+            client.update_current_span(metadata={"error_code": failure.error_code})
             raise ConversationAuthorizationError(failure.safe_message)
         if failure is not None:
-            client.update_current_trace(
-                metadata={**trace_metadata, "error_code": failure.error_code}
-            )
+            client.update_current_span(metadata={"error_code": failure.error_code})
         raise WorkflowExecutionError("The assistant execution did not reach a terminal state")
 
     async def _maintain_execution_lease(self, graph_input: RAGGraphInput) -> None:

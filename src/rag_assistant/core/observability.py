@@ -20,7 +20,13 @@ def configure_langfuse(settings: Settings) -> bool:
     Langfuse(
         public_key=settings.langfuse_public_key,
         secret_key=settings.langfuse_secret_key.get_secret_value(),
-        base_url=str(settings.langfuse_base_url),
+        # AnyHttpUrl canonicalizes a host-only URL with a trailing slash. Langfuse's
+        # exporter appends its API path directly, which would otherwise produce
+        # ``//api/public/otel/v1/traces`` and can be rejected by the hosted service.
+        base_url=str(settings.langfuse_base_url).rstrip("/"),
+        # Make Cloud v4 process OTLP spans immediately. This header is needed for
+        # real-time ingestion when using the default OpenTelemetry exporter.
+        additional_headers={"x-langfuse-ingestion-version": "4"},
     )
     return True
 
