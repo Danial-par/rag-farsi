@@ -34,6 +34,8 @@ dependencies = [
 rag-api = "rag_assistant.cli:run"
 rag-ingest = "rag_assistant.cli:ingest"
 rag-worker = "rag_assistant.cli:worker"
+rag-provider-check = "rag_assistant.cli:provider_check"
+rag-seed-sample = "rag_assistant.cli:seed_sample"
 rag-eval = "rag_assistant.evaluation_cli:run"
 rag-eval-live = "rag_assistant.evaluation_cli:run_live"
 

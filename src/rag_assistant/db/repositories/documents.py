@@ -359,7 +359,39 @@ class DocumentRepository:
         version.failed_at = None
         version.failure_code = None
         version.failure_message = None
-        version.extraction_metadata = {}
+        await self._session.flush()
+        return version
+
+    async def request_retry_shared(self, *, document_id: UUID, version_id: UUID) -> DocumentVersion:
+        """Requeue a failed shared version that has never been active."""
+        document = await self._session.scalar(
+            select(Document)
+            .where(
+                Document.id == document_id,
+                Document.is_shared.is_(True),
+                Document.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if document is None:
+            raise RecordNotFoundError("Shared document not found")
+        version = await self._session.scalar(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document.id,
+            )
+            .with_for_update()
+        )
+        if version is None:
+            raise RecordNotFoundError("Document version not found")
+        if version.status is not IngestionStatus.FAILED or version.activated_at is not None:
+            raise InvalidPersistenceStateError("Only failed, never-active versions can be retried")
+        version.status = IngestionStatus.PENDING
+        version.started_at = None
+        version.failed_at = None
+        version.failure_code = None
+        version.failure_message = None
         await self._session.flush()
         return version
 
@@ -527,12 +559,18 @@ class DocumentRepository:
             )
         )
         if existing:
-            if version.extraction_metadata == extraction_metadata and self._paragraphs_match(
-                existing, paragraphs
-            ):
+            if not self._paragraphs_match(existing, paragraphs):
+                raise ExtractionConflictError(
+                    "Persisted extraction conflicts with the deterministic retry result"
+                )
+            if version.extraction_metadata == extraction_metadata:
+                return existing
+            if not version.extraction_metadata:
+                version.extraction_metadata = extraction_metadata
+                await self._session.flush()
                 return existing
             raise ExtractionConflictError(
-                "Persisted extraction conflicts with the deterministic retry result"
+                "Persisted extraction metadata conflicts with the deterministic retry result"
             )
 
         models = [

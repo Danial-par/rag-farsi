@@ -215,6 +215,7 @@ async def test_embedding_failure_is_retriable_and_never_activates_partial_index(
     failed = await db_session.get(DocumentVersion, version_id)
     owner = await db_session.get(Document, document_id)
     assert failed is not None and failed.status is IngestionStatus.FAILED
+    assert failed.extraction_metadata
     assert owner is not None and owner.active_version_id is None
     assert (
         await db_session.scalar(

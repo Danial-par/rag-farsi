@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     openrouter_base_url: AnyHttpUrl = AnyHttpUrl("https://openrouter.ai/api/v1")
     openrouter_api_key: SecretStr | None = None
     chat_model: str = "openai/gpt-6-luna"
+    chat_reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "none"
     chat_connect_timeout_seconds: float = Field(default=10, gt=0, le=120)
     chat_read_timeout_seconds: float = Field(default=60, gt=0, le=600)
     chat_max_retries: int = Field(default=2, ge=0, le=5)
@@ -68,7 +69,7 @@ class Settings(BaseSettings):
     max_pdf_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=25 * 1024 * 1024)
 
     object_store_backend: Literal["local", "s3"] = "local"
-    local_object_store_root: Path = Path(".")
+    local_object_store_root: Path = Path(".local-data/objects")
     s3_bucket: str | None = None
     s3_endpoint_url: AnyHttpUrl | None = None
     s3_region: str | None = None
@@ -79,6 +80,11 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_log_level(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
+
+    @field_validator("s3_endpoint_url", mode="before")
+    @classmethod
+    def blank_optional_s3_endpoint_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def require_psycopg_driver(self) -> Self:

@@ -34,6 +34,10 @@ from rag_assistant.core.config import (
 from rag_assistant.core.event_loop import compatible_event_loop_factory  # noqa: E402
 from rag_assistant.main import create_app  # noqa: E402
 
+# Local developer credentials and provider settings must never alter test behavior.
+Settings.model_config["env_file"] = None
+get_settings.cache_clear()
+
 
 def pytest_asyncio_loop_factories(
     config: pytest.Config, item: pytest.Item

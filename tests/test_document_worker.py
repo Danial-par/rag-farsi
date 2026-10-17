@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -16,6 +17,65 @@ from rag_assistant.db.models import Document, User
 from rag_assistant.db.repositories import DocumentRepository, NewDocumentVersion, UserRepository
 from rag_assistant.indexing.storage import LocalObjectStore, ObjectStoreError
 from rag_assistant.indexing.worker import DocumentIngestionWorker
+
+
+async def test_worker_cli_once_mode_processes_a_single_item(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+) -> None:
+    from rag_assistant import cli
+
+    calls: list[str] = []
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            calls.append("dispose")
+
+    class FakeEmbeddingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def aclose(self) -> None:
+            calls.append("close_embeddings")
+
+    class FakeIndexingService:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+    class FakeWorker:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def run_once(self) -> bool:
+            calls.append("run_once")
+            return True
+
+        async def run_forever(self) -> None:
+            calls.append("run_forever")
+
+    class FakeLangfuse:
+        def flush(self) -> None:
+            calls.append("flush")
+
+        def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    monkeypatch.setattr(cli, "create_database_resources", lambda _: (FakeEngine(), object()))
+    monkeypatch.setattr(cli, "OpenRouterEmbeddingClient", FakeEmbeddingClient)
+    monkeypatch.setattr(cli, "create_object_store", lambda _: object())
+    monkeypatch.setattr(cli, "DocumentIndexingService", FakeIndexingService)
+    monkeypatch.setattr(cli, "DocumentIngestionWorker", FakeWorker)
+    monkeypatch.setattr("langfuse.get_client", lambda: FakeLangfuse())
+
+    processed = await cli._run_worker(
+        settings.model_copy(update={"openrouter_api_key": SecretStr("test-provider-key")}),
+        once=True,
+    )
+
+    assert processed is True
+    assert "run_once" in calls
+    assert "run_forever" not in calls
+    assert "dispose" in calls
 
 
 async def test_skip_locked_worker_claims_do_not_duplicate_work(

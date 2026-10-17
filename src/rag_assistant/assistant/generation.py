@@ -131,6 +131,7 @@ def create_chat_model(settings: Settings) -> ChatOpenAI:
             pool=settings.chat_connect_timeout_seconds,
         ),
         max_retries=settings.chat_max_retries,
+        reasoning_effort=settings.chat_reasoning_effort,
     )
 
 
