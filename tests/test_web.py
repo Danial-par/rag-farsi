@@ -25,7 +25,7 @@ async def test_static_assets_are_served_by_fastapi(client: AsyncClient) -> None:
     script = await client.get("/static/app.js")
 
     assert stylesheet.status_code == script.status_code == 200
-    assert "@media(max-width:760px)" in stylesheet.text
+    assert "@media (max-width: 760px)" in stylesheet.text
     assert "document-list" in script.text
 
 
@@ -45,3 +45,17 @@ def test_browser_client_obeys_security_and_chat_contracts() -> None:
     assert 'error.payload?.execution_status === "pending"' in script
     assert "citation.original_text" in script
     assert 'version?.status === "failed" && !doc.active_version_id' in script
+    assert "sessionStorage.setItem(draftKey(state.current.id)" in script
+    assert 'event.key === "Enter" && !event.shiftKey' in script
+    assert 'id="conversation-search"' in (WEB_ROOT / "templates" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "focusCitation(citationCards[citationIndex])" in script
+    assert "navigator.clipboard?.writeText" in script
+    assert 'file.type && file.type !== "application/pdf"' in script
+    assert 'id="sidebar-backdrop"' in (WEB_ROOT / "templates" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "prefers-reduced-motion: reduce" in (WEB_ROOT / "static" / "app.css").read_text(
+        encoding="utf-8"
+    )

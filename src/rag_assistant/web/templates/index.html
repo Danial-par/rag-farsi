@@ -31,7 +31,7 @@
 
     <div id="app-view" class="app-shell" hidden>
       <header class="topbar">
-        <button id="menu-toggle" class="icon-button mobile-only" type="button" aria-label="نمایش گفتگوها" aria-expanded="false">☰</button>
+        <button id="menu-toggle" class="icon-button mobile-only" type="button" aria-label="نمایش گفتگوها" aria-expanded="false" aria-controls="sidebar">☰</button>
         <a class="brand" href="/" aria-label="دستیار اسناد، صفحه اصلی"><span class="brand-mark">ر</span><span>دستیار اسناد</span></a>
         <div class="topbar-actions">
           <span id="user-email" class="user-email" dir="ltr"></span>
@@ -40,13 +40,22 @@
       </header>
 
       <div class="workspace">
+        <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="بستن پنل کناری" tabindex="-1" hidden></button>
         <aside id="sidebar" class="sidebar" aria-label="گفتگوها و اسناد">
           <div class="sidebar-heading"><h2>گفتگوها</h2><button id="new-conversation" class="icon-button" type="button" aria-label="گفتگوی تازه" title="گفتگوی تازه">＋</button></div>
+          <label class="visually-hidden" for="conversation-search">جست‌وجو در گفتگوها</label>
+          <input id="conversation-search" class="sidebar-search" type="search" placeholder="جست‌وجوی گفتگو…" autocomplete="off">
           <nav id="conversation-list" class="conversation-list" aria-label="فهرست گفتگوها"></nav>
           <section class="documents-section" aria-labelledby="documents-heading">
-            <div class="sidebar-heading"><h2 id="documents-heading">اسناد</h2><label class="icon-button upload-trigger" for="pdf-file" title="بارگذاری PDF" aria-label="بارگذاری PDF">＋</label></div>
-            <input id="pdf-file" class="visually-hidden" type="file" accept="application/pdf">
-            <label class="upload-label" for="pdf-file">بارگذاری فایل PDF</label>
+            <div class="sidebar-heading"><h2 id="documents-heading">اسناد</h2><span id="selected-count" class="selection-count" aria-live="polite">۰ سند انتخاب شده</span></div>
+            <label class="visually-hidden" for="document-search">جست‌وجو در اسناد</label>
+            <input id="document-search" class="sidebar-search" type="search" placeholder="جست‌وجوی سند…" autocomplete="off">
+            <input id="pdf-file" class="visually-hidden" type="file" accept="application/pdf,.pdf">
+            <label id="upload-zone" class="upload-zone" for="pdf-file" tabindex="0" role="button" aria-label="انتخاب یا رها کردن فایل PDF برای بارگذاری">
+              <span class="upload-title">فایل PDF را اینجا رها کنید</span>
+              <span class="upload-description">یا برای انتخاب فایل کلیک کنید</span>
+              <span id="upload-status" class="upload-status" role="status" aria-live="polite" hidden></span>
+            </label>
             <div id="document-list" class="document-list"></div>
             <p id="document-hint" class="small muted">اسناد فعال گفتگو برای پاسخ‌گویی استفاده می‌شوند.</p>
           </section>
@@ -70,7 +79,7 @@
             <form id="chat-form" class="composer">
               <label class="visually-hidden" for="question-input">پرسش شما</label>
               <textarea id="question-input" rows="1" maxlength="10000" placeholder="پرسش خود را درباره اسناد بنویسید…" required></textarea>
-              <button class="primary send-button" type="submit" aria-label="ارسال پرسش">ارسال</button>
+              <div class="composer-actions"><span id="character-count" class="character-count" aria-live="polite" hidden></span><button class="primary send-button" type="submit" aria-label="ارسال پرسش" disabled>ارسال</button></div>
             </form>
             <p class="composer-hint">پاسخ‌ها ممکن است ناقص باشند؛ ارجاع‌ها را بررسی کنید.</p>
           </div>

@@ -3,7 +3,7 @@
 
   const API = "/api/v1";
   const el = (id) => document.getElementById(id);
-  const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login" };
+  const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false };
   const unsafeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
   function csrfToken() {
@@ -74,17 +74,39 @@
     return node;
   }
 
-  function appendAnswerText(node, value) {
+  function appendAnswerText(node, value, citations = [], citationCards = []) {
     const source = String(value || "");
     const markers = /\[\s*\d+(?:\s*,\s*\d+)*\s*\]/g;
     let offset = 0;
     for (const match of source.matchAll(markers)) {
       const index = match.index ?? offset;
       node.append(document.createTextNode(source.slice(offset, index)));
-      const marker = document.createElement("bdi");
-      marker.dir = "ltr";
-      marker.textContent = match[0];
-      node.append(marker);
+      const numbers = [...match[0].matchAll(/\d+/g)];
+      let cursor = 0;
+      numbers.forEach((numberMatch, numberIndex) => {
+        const number = Number(numberMatch[0]);
+        const numberOffset = numberMatch.index ?? cursor;
+        node.append(document.createTextNode(match[0].slice(cursor, numberOffset)));
+        const citationIndex = number - 1;
+        if (number > 0 && citations[citationIndex] && citationCards[citationIndex]) {
+          const marker = document.createElement("button");
+          marker.type = "button";
+          marker.className = "citation-marker";
+          marker.dir = "ltr";
+          marker.textContent = `[${numberMatch[0]}]`;
+          marker.setAttribute("aria-label", `رفتن به ارجاع ${number}`);
+          marker.addEventListener("click", () => focusCitation(citationCards[citationIndex]));
+          node.append(marker);
+        } else {
+          node.append(document.createTextNode(numberMatch[0]));
+        }
+        cursor = numberOffset + numberMatch[0].length;
+        if (numberIndex < numbers.length - 1) {
+          const commaAt = match[0].indexOf(",", cursor);
+          if (commaAt !== -1) { node.append(document.createTextNode(match[0].slice(cursor, commaAt + 1))); cursor = commaAt + 1; }
+        }
+      });
+      node.append(document.createTextNode(match[0].slice(cursor)));
       offset = index + match[0].length;
     }
     node.append(document.createTextNode(source.slice(offset)));
@@ -107,13 +129,15 @@
   function renderDocuments() {
     const list = el("document-list");
     list.replaceChildren();
-    for (const doc of state.documents) {
+    const query = el("document-search").value.trim().toLocaleLowerCase();
+    const filtered = state.documents.filter((doc) => String(doc.title || "").toLocaleLowerCase().includes(query));
+    for (const doc of filtered) {
       const card = document.createElement("div"); card.className = "document-card";
       const line = document.createElement("div"); line.className = "document-line";
       const check = document.createElement("input"); check.type = "checkbox"; check.id = `doc-${doc.id}`;
       check.checked = state.selected.has(doc.id);
       const version = latestVersion(doc); const ready = Boolean(doc.active_version_id);
-      check.disabled = !ready || !state.current;
+      check.disabled = !ready || !state.current || state.sending;
       check.setAttribute("aria-label", `انتخاب سند ${doc.title}`);
       check.addEventListener("change", () => toggleDocument(doc.id, check.checked));
       const title = text("label", doc.title, "document-title"); title.htmlFor = check.id;
@@ -127,7 +151,9 @@
       }
       list.append(card);
     }
-    el("document-hint").textContent = state.documents.length ? "برای جست‌وجو، اسناد آماده را به گفتگو اضافه کنید." : "هنوز سندی بارگذاری نشده است.";
+    if (!filtered.length) list.append(text("p", state.documents.length ? "سندی با این نام پیدا نشد." : "هنوز سندی بارگذاری نشده است.", "sidebar-empty"));
+    el("document-hint").textContent = state.documents.length ? "اسناد انتخاب‌شده برای این گفتگو:" : "اسناد فعال گفتگو برای پاسخ‌گویی استفاده می‌شوند.";
+    el("selected-count").textContent = `${new Intl.NumberFormat("fa-IR").format(state.selected.size)} سند انتخاب شده`;
   }
 
   function updatePolling() {
@@ -151,11 +177,15 @@
 
   function renderConversations() {
     const list = el("conversation-list"); list.replaceChildren();
-    for (const conversation of state.conversations) {
+    const query = el("conversation-search").value.trim().toLocaleLowerCase();
+    const filtered = state.conversations.filter((conversation) => String(conversation.title || "گفتگوی تازه").toLocaleLowerCase().includes(query));
+    for (const conversation of filtered) {
       const button = text("button", conversation.title || "گفتگوی تازه", `conversation-item${state.current?.id === conversation.id ? " active" : ""}`);
       button.type = "button"; button.setAttribute("aria-current", state.current?.id === conversation.id ? "page" : "false");
+      button.disabled = state.sending;
       button.addEventListener("click", () => openConversation(conversation.id)); list.append(button);
     }
+    if (!filtered.length) list.append(text("p", state.conversations.length ? "گفتگویی با این عنوان پیدا نشد." : "هنوز گفتگویی ندارید.", "sidebar-empty"));
   }
 
   async function createConversation() {
@@ -170,6 +200,9 @@
     el("welcome").hidden = true; el("conversation-view").hidden = false;
     el("active-title").textContent = state.current.title || "گفتگوی تازه";
     el("message-list").replaceChildren(); announce("");
+    const draft = sessionStorage.getItem(draftKey(id)) || "";
+    el("question-input").value = draft;
+    resizeComposer(); updateComposer();
     await loadHistory(false); renderConversations(); renderDocuments();
     closeSidebar(); el("question-input").focus();
   }
@@ -212,23 +245,37 @@
       const labels = { fully_answered: "پاسخ بر پایه شواهد", partially_answered: "پاسخ نسبی · بخشی از پرسش بی‌پاسخ است", abstained: "شواهد کافی پیدا نشد" };
       bubble.append(text("span", labels[outcome] || outcome, `outcome${outcome === "partially_answered" ? " partial" : outcome === "abstained" ? " abstained" : ""}`));
     }
-    const content = text("div", "", "message-content");
-    appendAnswerText(content, message.content || (message.execution_status === "pending" ? "در حال آماده‌سازی پاسخ…" : ""));
-    bubble.append(content);
+    const citationCards = [];
+    let citations = null;
     if (message.citations?.length) {
-      const citations = document.createElement("div"); citations.className = "citation-list";
+      citations = document.createElement("div"); citations.className = "citation-list";
       message.citations.forEach((citation, index) => {
-        const details = document.createElement("details"); details.className = "citation";
+        const details = document.createElement("details"); details.className = "citation"; details.id = `citation-${crypto.randomUUID()}`; citationCards.push(details);
         const summary = text("summary", `[${index + 1}] ${citation.document_title} · صفحه ${citation.page_number} · بند ${citation.paragraph_number}`);
         const body = document.createElement("div"); body.className = "citation-body";
         body.append(text("div", `صفحه فیزیکی ${citation.page_number} · بند ${citation.paragraph_number}`, "citation-meta"));
-        body.append(text("div", citation.original_text)); details.append(summary, body); citations.append(details);
-      }); bubble.append(citations);
+        body.append(text("div", citation.original_text, "citation-text"));
+        const copyCitation = text("button", "کپی متن ارجاع", "copy-button citation-copy"); copyCitation.type = "button"; copyCitation.addEventListener("click", () => copyText(citation.original_text, copyCitation));
+        body.append(copyCitation); details.append(summary, body); citations.append(details);
+      });
     }
+    const content = text("div", "", "message-content");
+    const answerText = message.content || (message.execution_status === "pending" ? "در حال آماده‌سازی پاسخ…" : "");
+    appendAnswerText(content, answerText, message.citations || [], citationCards);
+    bubble.append(content);
+    if (message.role !== "user" && message.content) {
+      const copy = text("button", "کپی پاسخ", "copy-button"); copy.type = "button"; copy.addEventListener("click", () => copyText(message.content, copy)); bubble.append(copy);
+    }
+    if (citations) bubble.append(citations);
     return bubble;
   }
 
   async function submitQuestion(question, idempotencyKey = crypto.randomUUID(), failedBubble = null) {
+    if (state.sending || !state.current) return;
+    const conversationId = state.current.id;
+    const input = el("question-input");
+    if (failedBubble && input.value.trim() === question) input.value = "";
+    state.sending = true; updateComposer(); renderDocuments(); renderConversations();
     const target = el("message-list");
     const waiting = renderMessage({ role: "assistant", execution_status: "pending" });
     if (failedBubble) failedBubble.replaceWith(waiting);
@@ -237,10 +284,9 @@
       target.append(waiting);
     }
     target.scrollTop = target.scrollHeight;
-    const submit = el("chat-form").querySelector("button[type=submit]"); submit.disabled = true;
     try {
-      const answer = await api(`/conversations/${state.current.id}/messages`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ content: question }) });
-      waiting.replaceWith(renderMessage(answer)); state.retry = null; announce("");
+      const answer = await api(`/conversations/${conversationId}/messages`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ content: question }) });
+      waiting.replaceWith(renderMessage(answer)); state.retry = null; sessionStorage.removeItem(draftKey(conversationId)); input.value = ""; announce("");
     } catch (error) {
       state.retry = { question, idempotencyKey };
       const pending = error.payload?.execution_status === "pending";
@@ -250,21 +296,70 @@
       waiting.replaceWith(failure);
       const retry = text("button", pending ? "بررسی دوباره همین پرسش" : "تلاش دوباره برای همین پرسش", "retry-button"); retry.type = "button"; retry.addEventListener("click", () => submitQuestion(state.retry.question, state.retry.idempotencyKey, failure)); failure.append(retry);
       announce(pending ? "درخواست هنوز در حال اجراست؛ بررسی دوباره از همان شناسه درخواست استفاده می‌کند." : "اجرای پاسخ کامل نشد. در صورت تلاش دوباره، همان کلید درخواست استفاده می‌شود.", pending ? "" : "error");
-    } finally { submit.disabled = false; target.scrollTop = target.scrollHeight; }
+    } finally { state.sending = false; if (state.retry && input.value === "") { input.value = question; sessionStorage.setItem(draftKey(conversationId), question); } resizeComposer(); updateComposer(); renderDocuments(); renderConversations(); target.scrollTop = target.scrollHeight; }
+  }
+
+  function draftKey(id) { return `rag-draft:${id}`; }
+  function resizeComposer() { const input = el("question-input"); input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 170)}px`; }
+  function updateComposer() {
+    const input = el("question-input"); const button = el("chat-form").querySelector("button[type=submit]");
+    input.disabled = state.sending;
+    el("chat-form").setAttribute("aria-busy", String(state.sending));
+    button.disabled = state.sending || !input.value.trim() || !state.current;
+    button.textContent = state.sending ? "در حال ارسال…" : "ارسال";
+    el("new-conversation").disabled = state.sending;
+    el("welcome-new").disabled = state.sending;
+    const count = el("character-count");
+    count.hidden = input.value.length < 9000;
+    count.textContent = `${new Intl.NumberFormat("fa-IR").format(input.value.length)} / ۱۰٬۰۰۰`;
+    count.setAttribute("aria-label", `تعداد نویسه ${input.value.length} از ۱۰۰۰۰`);
+  }
+
+  function focusCitation(card) {
+    card.open = true;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("citation-highlight");
+    window.setTimeout(() => card.classList.remove("citation-highlight"), 1800);
+    card.querySelector("summary")?.focus({ preventScroll: true });
+  }
+
+  async function copyText(value, button) {
+    const original = button.textContent;
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(String(value));
+      else {
+        const field = document.createElement("textarea"); field.value = String(value); field.setAttribute("readonly", "");
+        field.style.position = "fixed"; field.style.opacity = "0"; document.body.append(field); field.select();
+        const copied = document.execCommand("copy"); field.remove(); if (!copied) throw new Error("copy failed");
+      }
+      button.textContent = "کپی شد"; button.classList.add("copy-feedback");
+    } catch (_) { button.textContent = "کپی نشد"; button.classList.add("copy-failed"); }
+    window.setTimeout(() => { button.textContent = original; button.classList.remove("copy-feedback", "copy-failed"); }, 1800);
   }
 
   async function uploadPdf(file) {
+    if (state.uploading) return;
+    if (!file || !file.name.toLowerCase().endsWith(".pdf") || (file.type && file.type !== "application/pdf")) {
+      setUploadStatus("فقط فایل PDF پذیرفته می‌شود.", "error"); return;
+    }
+    state.uploading = true; el("upload-zone").classList.add("uploading");
+    setUploadStatus(`در حال بارگذاری ${file.name}…`, "busy");
     const query = new URLSearchParams({ title: file.name.replace(/\.pdf$/i, "") || "سند تازه" });
-    await api(`/documents?${query}`, { method: "POST", headers: { "Content-Type": "application/pdf" }, body: file });
-    announce("فایل دریافت شد. پردازش آن به‌صورت خودکار پیگیری می‌شود.", "success"); await loadDocuments();
+    try {
+      await api(`/documents?${query}`, { method: "POST", headers: { "Content-Type": "application/pdf" }, body: file });
+      setUploadStatus(`${file.name} دریافت شد؛ پردازش آن پیگیری می‌شود.`, "success"); await loadDocuments();
+    } catch (error) { setUploadStatus(error.message, "error"); }
+    finally { state.uploading = false; el("upload-zone").classList.remove("uploading"); }
   }
+
+  function setUploadStatus(message, kind = "") { const status = el("upload-status"); status.textContent = message; status.className = `upload-status ${kind}`; status.hidden = !message; }
 
   async function retryVersion(doc, version) {
     try { await api(`/documents/${doc.id}/versions/${version.id}/retry`, { method: "POST" }); announce("درخواست پردازش دوباره ثبت شد.", "success"); await loadDocuments(); }
     catch (error) { announce(error.message, "error"); }
   }
 
-  function closeSidebar() { el("sidebar").classList.remove("open"); el("menu-toggle").setAttribute("aria-expanded", "false"); }
+  function closeSidebar() { el("sidebar").classList.remove("open"); el("sidebar-backdrop").hidden = true; el("menu-toggle").setAttribute("aria-expanded", "false"); }
 
   el("auth-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const form = new FormData(event.currentTarget);
@@ -291,12 +386,27 @@
     if (!question || !state.current) return;
     input.value = ""; submitQuestion(question).catch((error) => announce(error.message, "error"));
   });
+  el("question-input").addEventListener("input", () => {
+    if (state.current) sessionStorage.setItem(draftKey(state.current.id), el("question-input").value);
+    resizeComposer(); updateComposer();
+  });
+  el("question-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!el("chat-form").querySelector("button[type=submit]").disabled) el("chat-form").requestSubmit(); }
+  });
+  el("conversation-search").addEventListener("input", renderConversations);
+  el("document-search").addEventListener("input", renderDocuments);
   el("pdf-file").addEventListener("change", async (event) => {
     const file = event.target.files?.[0]; if (!file) return;
-    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { announce("فقط فایل PDF پذیرفته می‌شود.", "error"); event.target.value = ""; return; }
-    try { await uploadPdf(file); } catch (error) { announce(error.message, "error"); } finally { event.target.value = ""; }
+    await uploadPdf(file); event.target.value = "";
   });
-  el("menu-toggle").addEventListener("click", () => { const open = el("sidebar").classList.toggle("open"); el("menu-toggle").setAttribute("aria-expanded", String(open)); });
+  const uploadZone = el("upload-zone");
+  uploadZone.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); el("pdf-file").click(); } });
+  ["dragenter", "dragover"].forEach((name) => uploadZone.addEventListener(name, (event) => { event.preventDefault(); uploadZone.classList.add("drag-over"); }));
+  ["dragleave", "drop"].forEach((name) => uploadZone.addEventListener(name, (event) => { event.preventDefault(); uploadZone.classList.remove("drag-over"); }));
+  uploadZone.addEventListener("drop", (event) => { const file = event.dataTransfer?.files?.[0]; if (file) uploadPdf(file); });
+  el("menu-toggle").addEventListener("click", () => { const open = el("sidebar").classList.toggle("open"); el("sidebar-backdrop").hidden = !open; el("menu-toggle").setAttribute("aria-expanded", String(open)); });
+  el("sidebar-backdrop").addEventListener("click", closeSidebar);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && el("sidebar").classList.contains("open")) { closeSidebar(); el("menu-toggle").focus(); } });
 
   async function startApp() {
     showApp(); el("user-email").textContent = state.user?.email || "";
