@@ -129,13 +129,18 @@ class DocumentVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base)
         ),
         CheckConstraint(
             "(status = 'pending' AND started_at IS NULL AND completed_at IS NULL "
-            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL) OR "
+            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL "
+            "AND processing_attempt_id IS NULL AND processing_lease_expires_at IS NULL) OR "
             "(status = 'processing' AND started_at IS NOT NULL AND completed_at IS NULL "
-            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL) OR "
+            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL "
+            "AND processing_attempt_id IS NOT NULL "
+            "AND processing_lease_expires_at > started_at) OR "
             "(status = 'succeeded' AND started_at IS NOT NULL AND completed_at IS NOT NULL "
-            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL) OR "
+            "AND failed_at IS NULL AND failure_code IS NULL AND failure_message IS NULL "
+            "AND processing_attempt_id IS NULL AND processing_lease_expires_at IS NULL) OR "
             "(status = 'failed' AND completed_at IS NULL AND failed_at IS NOT NULL "
-            "AND failure_code IS NOT NULL AND failure_message IS NOT NULL)",
+            "AND failure_code IS NOT NULL AND failure_message IS NOT NULL "
+            "AND processing_attempt_id IS NULL AND processing_lease_expires_at IS NULL)",
             name="ingestion_lifecycle_valid",
         ),
         CheckConstraint(
@@ -150,6 +155,7 @@ class DocumentVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base)
         ),
         Index("ix_document_versions_document_id_status", "document_id", "status"),
         Index("ix_document_versions_content_hash", "content_hash"),
+        Index("ix_document_versions_processing_lease", "status", "processing_lease_expires_at"),
         Index(
             "ix_document_versions_embedding_configuration",
             "embedding_model",
@@ -184,6 +190,10 @@ class DocumentVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_attempt_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    processing_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -335,7 +345,11 @@ class ChunkSourceParagraph(CreatedAtMixin, Base):
         ),
         UniqueConstraint("chunk_id", "ordinal"),
         CheckConstraint("ordinal >= 1", name="ordinal_positive"),
-        CheckConstraint("end_offset IS NULL OR end_offset > start_offset", name="offsets_ordered"),
+        CheckConstraint(
+            "(start_offset IS NULL AND end_offset IS NULL) OR "
+            "(start_offset >= 0 AND end_offset > start_offset)",
+            name="offsets_complete_and_ordered",
+        ),
     )
 
     chunk_id: Mapped[UUID] = mapped_column(primary_key=True)

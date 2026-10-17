@@ -64,6 +64,17 @@
 - Fail ingestion for encrypted, malformed, empty, OCR-required, materially image-only, or ambiguous unsupported layouts rather than persisting incomplete evidence.
 - Add table-header context only to normalized table-row text; add section context later during chunk construction, not to source paragraphs.
 
+## Indexing rules
+
+- Count chunk tokens with the embedding model's tiktoken encoding, falling back to cl100k_base.
+- Target 400-token chunks with a 600-token hard limit and one complete-paragraph overlap.
+- Repeat the nearest preceding heading as provenance-backed retrieval context.
+- Oversized-paragraph offsets are half-open character offsets into normalized source text.
+- Successful indexing activates automatically in the final publication transaction.
+- Protect retriable ingestion attempts with attempt identifiers and renewable leases.
+- Load immutable sources through async S3-compatible storage in production and a confined local adapter for fixtures.
+- Generate OpenRouter embeddings through direct async HTTP with bounded configurable batching, concurrency, timeouts, and retries.
+
 ## Persistence rules
 
 - Generate UUIDs and timezone-aware UTC timestamps in the application.

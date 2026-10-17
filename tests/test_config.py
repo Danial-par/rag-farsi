@@ -55,3 +55,13 @@ def test_secure_cookies_are_environment_aware() -> None:
 
     assert local.secure_cookies is False
     assert production.secure_cookies is True
+
+
+def test_chunk_target_cannot_exceed_hard_maximum() -> None:
+    with pytest.raises(ValidationError, match="CHUNK_TARGET_TOKENS"):
+        Settings(
+            database_url="postgresql+psycopg://user:password@localhost/database",
+            jwt_secret=JWT_SECRET,
+            chunk_target_tokens=601,
+            chunk_max_tokens=600,
+        )

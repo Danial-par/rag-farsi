@@ -5,6 +5,7 @@ from rag_assistant.db.repositories.conversations import ConversationRepository
 from rag_assistant.db.repositories.documents import (
     ChunkParagraphReference,
     DocumentRepository,
+    IngestionClaim,
     NewChunk,
     NewDocumentVersion,
     NewSourceParagraph,
@@ -25,6 +26,7 @@ __all__ = [
     "DocumentRepository",
     "ExtractionConflictError",
     "InvalidPersistenceStateError",
+    "IngestionClaim",
     "NewChunk",
     "NewDocumentVersion",
     "NewSourceParagraph",

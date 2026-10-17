@@ -9,6 +9,26 @@ from rag_assistant.extraction.domain import ExtractedDocument, PdfExtractionErro
 from rag_assistant.extraction.pdf import PdfExtractor
 
 
+def extracted_paragraphs(result: ExtractedDocument) -> list[NewSourceParagraph]:
+    """Convert validated extractor output to the persistence boundary shape."""
+    return [
+        NewSourceParagraph(
+            page_number=block.page_number,
+            paragraph_number=block.paragraph_number,
+            kind=block.kind,
+            original_text=block.original_text,
+            normalized_text=block.normalized_text,
+            metadata={
+                **block.metadata,
+                "bounding_box": block.bounding_box.model_dump(mode="json"),
+                "extraction_version": result.metadata.extraction_version,
+                "normalization_version": result.metadata.normalization_version,
+            },
+        )
+        for block in result.paragraphs
+    ]
+
+
 class DocumentExtractionService:
     """Run PDF extraction off the event loop and persist its immutable result."""
 
@@ -37,25 +57,9 @@ class DocumentExtractionService:
             )
             raise
 
-        paragraphs = [
-            NewSourceParagraph(
-                page_number=block.page_number,
-                paragraph_number=block.paragraph_number,
-                kind=block.kind,
-                original_text=block.original_text,
-                normalized_text=block.normalized_text,
-                metadata={
-                    **block.metadata,
-                    "bounding_box": block.bounding_box.model_dump(mode="json"),
-                    "extraction_version": result.metadata.extraction_version,
-                    "normalization_version": result.metadata.normalization_version,
-                },
-            )
-            for block in result.paragraphs
-        ]
         await self._repository.persist_extraction(
             version_id=version_id,
-            paragraphs=paragraphs,
+            paragraphs=extracted_paragraphs(result),
             extraction_metadata=result.metadata.model_dump(mode="json"),
         )
         return result

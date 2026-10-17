@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
+from math import isfinite
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_assistant.db.base import utc_now
@@ -64,6 +66,19 @@ class NewChunk:
     embedding: Sequence[float]
     paragraphs: Sequence[ChunkParagraphReference]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionClaim:
+    version_id: UUID
+    document_id: UUID
+    attempt_id: UUID
+    object_key: str
+    content_hash: str
+    file_size_bytes: int
+    media_type: str
+    embedding_model: str
+    embedding_dimensions: int
 
 
 class DocumentRepository:
@@ -194,14 +209,78 @@ class DocumentRepository:
         await self._session.flush()
         return version
 
-    async def mark_processing(self, version_id: UUID) -> DocumentVersion:
+    async def mark_processing(
+        self, version_id: UUID, *, lease_duration: timedelta = timedelta(minutes=5)
+    ) -> DocumentVersion:
         version = await self._locked_version(version_id)
         if version.status is not IngestionStatus.PENDING:
             raise InvalidPersistenceStateError("Only pending versions can start processing")
+        now = utc_now()
         version.status = IngestionStatus.PROCESSING
-        version.started_at = utc_now()
+        version.started_at = now
+        version.processing_attempt_id = uuid4()
+        version.processing_lease_expires_at = now + lease_duration
         await self._session.flush()
         return version
+
+    async def claim_for_indexing(
+        self, version_id: UUID, *, lease_duration: timedelta
+    ) -> IngestionClaim:
+        """Atomically claim a pending, failed, or expired never-active version."""
+        if lease_duration.total_seconds() <= 0:
+            raise ValueError("Ingestion lease duration must be positive")
+        version = await self._locked_version(version_id)
+        now = utc_now()
+        is_expired = (
+            version.status is IngestionStatus.PROCESSING
+            and version.processing_lease_expires_at is not None
+            and version.processing_lease_expires_at <= now
+        )
+        if version.activated_at is not None or version.status is IngestionStatus.SUCCEEDED:
+            raise InvalidPersistenceStateError(
+                "An activated or successful version cannot be retried"
+            )
+        if (
+            version.status not in {IngestionStatus.PENDING, IngestionStatus.FAILED}
+            and not is_expired
+        ):
+            raise InvalidPersistenceStateError("Document version is already being processed")
+
+        attempt_id = uuid4()
+        version.status = IngestionStatus.PROCESSING
+        version.started_at = now
+        version.completed_at = None
+        version.failed_at = None
+        version.failure_code = None
+        version.failure_message = None
+        version.processing_attempt_id = attempt_id
+        version.processing_lease_expires_at = now + lease_duration
+        await self._session.execute(delete(Chunk).where(Chunk.document_version_id == version.id))
+        await self._session.flush()
+        return IngestionClaim(
+            version_id=version.id,
+            document_id=version.document_id,
+            attempt_id=attempt_id,
+            object_key=version.object_key,
+            content_hash=version.content_hash,
+            file_size_bytes=version.file_size_bytes,
+            media_type=version.media_type,
+            embedding_model=version.embedding_model,
+            embedding_dimensions=version.embedding_dimensions,
+        )
+
+    async def renew_ingestion_lease(
+        self,
+        version_id: UUID,
+        *,
+        attempt_id: UUID,
+        lease_duration: timedelta,
+    ) -> None:
+        version = await self._locked_current_attempt(
+            version_id, attempt_id, require_unexpired=False
+        )
+        version.processing_lease_expires_at = utc_now() + lease_duration
+        await self._session.flush()
 
     async def mark_succeeded(
         self, version_id: UUID, *, extraction_metadata: dict[str, Any]
@@ -212,6 +291,8 @@ class DocumentRepository:
         version.status = IngestionStatus.SUCCEEDED
         version.extraction_metadata = extraction_metadata
         version.completed_at = utc_now()
+        version.processing_attempt_id = None
+        version.processing_lease_expires_at = None
         await self._session.flush()
         return version
 
@@ -222,14 +303,26 @@ class DocumentRepository:
         failure_code: str,
         failure_message: str,
         extraction_metadata: dict[str, Any] | None = None,
+        attempt_id: UUID | None = None,
     ) -> DocumentVersion:
-        version = await self._locked_version(version_id)
+        if not failure_code.strip() or len(failure_code) > 100:
+            raise ValueError("Failure code must contain at most 100 characters")
+        safe_message = failure_message.strip()[:1000]
+        if not safe_message:
+            raise ValueError("Failure message cannot be blank")
+        version = (
+            await self._locked_current_attempt(version_id, attempt_id, require_unexpired=False)
+            if attempt_id is not None
+            else await self._locked_version(version_id)
+        )
         if version.status not in {IngestionStatus.PENDING, IngestionStatus.PROCESSING}:
             raise InvalidPersistenceStateError("Only unfinished versions can fail")
         version.status = IngestionStatus.FAILED
         version.failed_at = utc_now()
         version.failure_code = failure_code
-        version.failure_message = failure_message
+        version.failure_message = safe_message
+        version.processing_attempt_id = None
+        version.processing_lease_expires_at = None
         if extraction_metadata is not None:
             version.extraction_metadata = extraction_metadata
         await self._session.flush()
@@ -309,9 +402,14 @@ class DocumentRepository:
         version_id: UUID,
         paragraphs: Sequence[NewSourceParagraph],
         extraction_metadata: dict[str, Any],
+        attempt_id: UUID | None = None,
     ) -> list[SourceParagraph]:
         """Atomically persist a deterministic extraction, preserving IDs on retries."""
-        version = await self._locked_version(version_id)
+        version = (
+            await self._locked_current_attempt(version_id, attempt_id)
+            if attempt_id is not None
+            else await self._locked_version(version_id)
+        )
         if version.status is not IngestionStatus.PROCESSING:
             raise InvalidPersistenceStateError(
                 "Extraction can only be persisted while a version is processing"
@@ -373,8 +471,15 @@ class DocumentRepository:
         version = await self._locked_version(version_id)
         if version.status is not IngestionStatus.PROCESSING:
             raise InvalidPersistenceStateError("Chunks can only be added while processing")
+        return await self._add_chunk(version, values)
+
+    async def _add_chunk(self, version: DocumentVersion, values: NewChunk) -> Chunk:
         if len(values.embedding) != version.embedding_dimensions:
             raise InvalidPersistenceStateError("Embedding dimensions do not match the version")
+        if not values.normalized_text.strip() or values.token_count <= 0:
+            raise InvalidPersistenceStateError("Chunk text and token count must be positive")
+        if any(not isfinite(float(value)) for value in values.embedding):
+            raise InvalidPersistenceStateError("Embedding values must be finite")
         paragraph_ids = [item.source_paragraph_id for item in values.paragraphs]
         if not paragraph_ids or len(paragraph_ids) != len(set(paragraph_ids)):
             raise InvalidPersistenceStateError("Chunk provenance must contain unique paragraphs")
@@ -391,7 +496,33 @@ class DocumentRepository:
             )
 
         snapshot: list[dict[str, Any]] = []
+        for reference in values.paragraphs:
+            paragraph = paragraphs_by_id[reference.source_paragraph_id]
+            if (reference.start_offset is None) is not (reference.end_offset is None):
+                raise InvalidPersistenceStateError("Chunk provenance offsets must be complete")
+            if (
+                reference.start_offset is not None
+                and reference.end_offset is not None
+                and not 0
+                <= reference.start_offset
+                < reference.end_offset
+                <= len(paragraph.normalized_text)
+            ):
+                raise InvalidPersistenceStateError(
+                    "Chunk provenance offsets are outside normalized source text"
+                )
+            snapshot.append(
+                {
+                    "source_paragraph_id": str(paragraph.id),
+                    "page_number": paragraph.page_number,
+                    "paragraph_number": paragraph.paragraph_number,
+                    "start_offset": reference.start_offset,
+                    "end_offset": reference.end_offset,
+                }
+            )
+        chunk_id = uuid4()
         chunk = Chunk(
+            id=chunk_id,
             document_version_id=version.id,
             ordinal=values.ordinal,
             normalized_text=values.normalized_text,
@@ -407,30 +538,59 @@ class DocumentRepository:
 
         links: list[ChunkSourceParagraph] = []
         for ordinal, reference in enumerate(values.paragraphs, start=1):
-            paragraph = paragraphs_by_id[reference.source_paragraph_id]
-            snapshot.append(
-                {
-                    "source_paragraph_id": str(paragraph.id),
-                    "page_number": paragraph.page_number,
-                    "paragraph_number": paragraph.paragraph_number,
-                    "start_offset": reference.start_offset,
-                    "end_offset": reference.end_offset,
-                }
-            )
             links.append(
                 ChunkSourceParagraph(
-                    chunk_id=chunk.id,
-                    source_paragraph_id=paragraph.id,
+                    chunk_id=chunk_id,
+                    source_paragraph_id=reference.source_paragraph_id,
                     document_version_id=version.id,
                     ordinal=ordinal,
                     start_offset=reference.start_offset,
                     end_offset=reference.end_offset,
                 )
             )
-        chunk.provenance_snapshot = snapshot
         self._session.add_all(links)
         await self._session.flush()
         return chunk
+
+    async def publish_index(
+        self,
+        *,
+        version_id: UUID,
+        attempt_id: UUID,
+        chunks: Sequence[NewChunk],
+        extraction_metadata: dict[str, Any],
+    ) -> DocumentVersion:
+        """Atomically publish a complete index, succeed it, and make it active."""
+        version = await self._locked_current_attempt(version_id, attempt_id)
+        if not chunks or [chunk.ordinal for chunk in chunks] != list(range(1, len(chunks) + 1)):
+            raise InvalidPersistenceStateError("Published chunks must have consecutive ordinals")
+        await self._session.execute(delete(Chunk).where(Chunk.document_version_id == version.id))
+        for values in chunks:
+            await self._add_chunk(version, values)
+
+        now = utc_now()
+        version.status = IngestionStatus.SUCCEEDED
+        version.extraction_metadata = extraction_metadata
+        version.completed_at = now
+        version.failed_at = None
+        version.failure_code = None
+        version.failure_message = None
+        version.processing_attempt_id = None
+        version.processing_lease_expires_at = None
+        if version.activated_at is None:
+            version.activated_at = now
+        await self._session.flush()
+
+        document = await self._session.scalar(
+            select(Document).where(Document.id == version.document_id).with_for_update()
+        )
+        if document is None or document.deleted_at is not None:
+            raise InvalidPersistenceStateError("The indexed document is unavailable")
+        document.active_version_id = version.id
+        await self._session.flush()
+        if document.is_default:
+            await self._attach_default_document_to_conversations(document.id)
+        return version
 
     async def soft_delete_owned(self, *, owner_id: UUID, document_id: UUID) -> Document:
         document = await self._locked_owned_document(owner_id, document_id)
@@ -479,6 +639,27 @@ class DocumentRepository:
         )
         if version is None:
             raise RecordNotFoundError("Document version not found")
+        return version
+
+    async def _locked_current_attempt(
+        self,
+        version_id: UUID,
+        attempt_id: UUID,
+        *,
+        require_unexpired: bool = True,
+    ) -> DocumentVersion:
+        version = await self._locked_version(version_id)
+        if (
+            version.status is not IngestionStatus.PROCESSING
+            or version.processing_attempt_id != attempt_id
+        ):
+            raise InvalidPersistenceStateError("Ingestion attempt no longer owns the version")
+        if (
+            require_unexpired
+            and version.processing_lease_expires_at is not None
+            and version.processing_lease_expires_at <= utc_now()
+        ):
+            raise InvalidPersistenceStateError("Ingestion attempt lease has expired")
         return version
 
     async def _attach_default_document_to_conversations(self, document_id: UUID) -> None:
