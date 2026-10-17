@@ -233,13 +233,17 @@ async def test_unknown_or_duplicate_aliases_are_rejected() -> None:
         [
             _response(
                 AnswerOutcome.FULLY_ANSWERED, claims=[AnswerClaim(text="پاسخ", citations=["E2"])]
-            )
+            ),
+            _response(
+                AnswerOutcome.FULLY_ANSWERED, claims=[AnswerClaim(text="پاسخ", citations=["E2"])]
+            ),
         ]
     )
     with pytest.raises(ValueError, match="unknown citation"):
         await OpenRouterAnswerGenerator(model=unknown).generate(
             question="پرسش", history=(), evidence=evidence
         )
+    assert unknown.calls == 2
 
     repeated = FakeStructuredModel(
         [
@@ -249,13 +253,44 @@ async def test_unknown_or_duplicate_aliases_are_rejected() -> None:
                     AnswerClaim(text="ادعای یک", citations=["E1"]),
                     AnswerClaim(text="ادعای دو", citations=["E1"]),
                 ],
-            )
+            ),
+            _response(
+                AnswerOutcome.FULLY_ANSWERED,
+                claims=[
+                    AnswerClaim(text="ادعای یک", citations=["E1"]),
+                    AnswerClaim(text="ادعای دو", citations=["E1"]),
+                ],
+            ),
         ]
     )
     with pytest.raises(ValueError, match="duplicated"):
         await OpenRouterAnswerGenerator(model=repeated).generate(
             question="پرسش", history=(), evidence=evidence
         )
+    assert repeated.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_generator_retries_semantically_invalid_outcome_shape() -> None:
+    model = FakeStructuredModel(
+        [
+            _response(
+                AnswerOutcome.PARTIALLY_ANSWERED,
+                unsupported_parts=["پاسخ مستند نیست"],
+            ),
+            _response(AnswerOutcome.ABSTAINED),
+        ]
+    )
+
+    answer = await OpenRouterAnswerGenerator(model=model).generate(
+        question="پرسش نامرتبط", history=(), evidence=_evidence()
+    )
+
+    assert answer.outcome is AnswerOutcome.ABSTAINED
+    assert answer.cited_paragraph_ids == ()
+    assert model.calls == 2
+    assert "partial result needs at least one supported" in str(model.messages[1])
+    assert "Do not add topical or tangential claims" in str(model.messages[1])
 
 
 @pytest.mark.asyncio
@@ -306,6 +341,8 @@ async def test_prompt_separates_history_question_and_untrusted_evidence() -> Non
     assert "untrusted quoted source material" in prompt
     assert "E1" in prompt
     assert "physical_page" in prompt
+    assert "multiple separable requested parts" in prompt
+    assert "Never add tangential claims to avoid abstaining" in prompt
 
 
 @pytest.mark.asyncio

@@ -321,3 +321,16 @@ async def test_live_runner_uses_graph_retrieval_and_persists_snapshot(
     )
     assert resumed.cases_scored == 1
     assert generator.calls == 1
+
+    fresh_dataset = dataset.model_copy(update={"dataset_id": "sample-doc-v2-fresh-run"})
+    fresh_run = await run_live_evaluation(
+        settings=local_settings,
+        dataset=fresh_dataset,
+        case_ids=["fa-rag-stages"],
+        artifacts_dir=tmp_path / "reports",
+        embedding_client=FixedEmbeddingClient(),
+        session_factory=session_factory,
+        answer_generator=generator,
+    )
+    assert fresh_run.cases_scored == 1
+    assert generator.calls == 2

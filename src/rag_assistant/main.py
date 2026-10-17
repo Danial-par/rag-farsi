@@ -10,7 +10,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from langfuse import get_client
 
 from rag_assistant import __version__
 from rag_assistant.api.health import router as health_router
@@ -25,6 +24,7 @@ from rag_assistant.assistant import (
 )
 from rag_assistant.core.config import Settings, get_settings
 from rag_assistant.core.logging import RequestContextMiddleware, configure_logging
+from rag_assistant.core.observability import configure_langfuse, shutdown_langfuse
 from rag_assistant.core.security import PasswordManager, TokenManager
 from rag_assistant.db.base import utc_now
 from rag_assistant.db.repositories import ConversationRepository
@@ -60,6 +60,7 @@ class _SessionScopedRetriever:
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create an independently configurable FastAPI application."""
     resolved_settings = settings or get_settings()
+    configure_langfuse(resolved_settings)
     configure_logging(resolved_settings.log_level)
     logger = structlog.stdlib.get_logger(__name__)
     engine, session_factory = create_database_resources(resolved_settings)
@@ -109,8 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await recovery_task
             if embedding_client is not None:
                 await embedding_client.aclose()
-            get_client().flush()
-            get_client().shutdown()
+            shutdown_langfuse(resolved_settings)
             await engine.dispose()
             await logger.ainfo("application_stopped")
 

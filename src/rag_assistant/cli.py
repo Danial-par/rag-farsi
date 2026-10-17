@@ -11,6 +11,7 @@ import uvicorn
 from rag_assistant.core.config import Settings, get_settings
 from rag_assistant.core.event_loop import compatible_event_loop_factory
 from rag_assistant.core.logging import configure_logging
+from rag_assistant.core.observability import configure_langfuse, shutdown_langfuse
 from rag_assistant.db.session import create_database_resources
 from rag_assistant.indexing import (
     DocumentIndexingService,
@@ -79,10 +80,7 @@ async def _ingest_version(version_id: UUID, settings: Settings) -> None:
         await service.index_version(version_id)
     finally:
         await embedding_client.aclose()
-        from langfuse import get_client
-
-        get_client().flush()
-        get_client().shutdown()
+        shutdown_langfuse(settings)
         await engine.dispose()
 
 
@@ -90,6 +88,7 @@ def ingest(argv: Sequence[str] | None = None) -> None:
     """Run the one-shot, lease-protected document indexing command."""
     args = _ingestion_parser().parse_args(argv)
     settings = get_settings()
+    configure_langfuse(settings)
     configure_logging(settings.log_level)
     asyncio.run(
         _ingest_version(args.version_id, settings),
@@ -127,10 +126,7 @@ async def _run_worker(settings: Settings, *, once: bool = False) -> bool:
         return False
     finally:
         await embedding_client.aclose()
-        from langfuse import get_client
-
-        get_client().flush()
-        get_client().shutdown()
+        shutdown_langfuse(settings)
         await engine.dispose()
 
 
@@ -138,6 +134,7 @@ def worker(argv: Sequence[str] | None = None) -> None:
     """Run the database polling worker continuously or for one claimed item."""
     args = _worker_parser().parse_args(argv)
     settings = get_settings()
+    configure_langfuse(settings)
     configure_logging(settings.log_level)
     asyncio.run(_run_worker(settings, once=args.once), loop_factory=compatible_event_loop_factory)
 

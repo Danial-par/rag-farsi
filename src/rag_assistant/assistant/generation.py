@@ -84,21 +84,31 @@ class OpenRouterAnswerGenerator:
                     *messages,
                     HumanMessage(
                         content=(
-                            "The previous response was not valid for the required schema. "
-                            "Return only a corrected response matching the schema; use only "
-                            "the supplied evidence aliases."
+                            "The previous response did not satisfy the required answer rules. "
+                            "Return only a corrected response matching the schema. A fully "
+                            "answered result needs at least one supported cited claim and no "
+                            "unsupported parts. A partial result needs at least one supported "
+                            "cited claim and at least one unsupported part, and each supported "
+                            "claim must directly answer a requested part. Do not add topical or "
+                            "tangential claims to avoid abstaining. If no requested part is "
+                            "directly supported, abstain. An abstention needs no claims, no "
+                            "unsupported parts, and explicit abstention text. Use only the "
+                            "supplied evidence aliases."
                         )
                     ),
                 ]
             response = await schema_model.ainvoke(messages)
             parsed = response.get("parsed") if isinstance(response, dict) else None
-            if isinstance(parsed, StructuredAnswer):
-                break
-        else:
-            raise ValueError("The answer model did not return valid structured output")
-
-        structured = response["parsed"]
-        return _candidate_from_structured(question, structured, alias_sources, response.get("raw"))
+            if not isinstance(parsed, StructuredAnswer):
+                continue
+            try:
+                return _candidate_from_structured(
+                    question, parsed, alias_sources, response.get("raw")
+                )
+            except ValueError:
+                if attempt == 1:
+                    raise
+        raise ValueError("The answer model did not return valid structured output")
 
 
 class EvidenceAnswerValidator:
@@ -175,10 +185,13 @@ def _generation_messages(
         "evidence does not support. Answer in the language of the current question. Preserve "
         "Persian wording and meaning faithfully. Return one concise claim per answer claim, with "
         "one or more exact supplied citation aliases for each. Use fully_answered only when the "
-        "evidence supports the complete question. Use partially_answered when some answer claims "
-        "are supported and list every unsupported portion explicitly. Use abstained when no "
-        "material answer is supported; then return no claims, no unsupported_parts, and an "
-        "explicit abstention_text in the question's language. Never "
+        "evidence supports the complete question. Use partially_answered only when the question "
+        "has multiple separable requested parts, at least one requested part is directly "
+        "answered by evidence, and at least one other requested part is unsupported; list every "
+        "unsupported portion explicitly. If no requested part is directly supported, abstain "
+        "even when retrieved text is topically related. Never add tangential claims to avoid "
+        "abstaining. Use abstained when no material answer is supported; then return no claims, "
+        "no unsupported_parts, and an explicit abstention_text in the question's language. Never "
         "invent or modify citation aliases."
     )
     return [

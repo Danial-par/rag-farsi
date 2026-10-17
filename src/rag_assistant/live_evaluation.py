@@ -26,6 +26,7 @@ from rag_assistant.assistant import (
     create_rag_workflow,
 )
 from rag_assistant.core.config import Settings
+from rag_assistant.core.observability import configure_langfuse, shutdown_langfuse
 from rag_assistant.core.security import PasswordManager
 from rag_assistant.db.base import utc_now
 from rag_assistant.db.models import (
@@ -92,6 +93,7 @@ async def run_live_evaluation(
     """Run selected cases through live embeddings, authorized pgvector retrieval and graph."""
     if settings.openrouter_api_key is None:
         raise ValueError("Set OPENROUTER_API_KEY to run live evaluation")
+    configure_langfuse(settings)
     selected = _select_cases(dataset, case_ids)
     if not selected:
         raise ValueError("At least one evaluation case must be selected")
@@ -141,7 +143,11 @@ async def run_live_evaluation(
             if case.case_id in completed:
                 continue
             conversation_id = await _evaluation_conversation(
-                session_factory, user_id=user_id, sample_id=sample_id, case=case
+                session_factory,
+                user_id=user_id,
+                sample_id=sample_id,
+                dataset_id=dataset.dataset_id,
+                case=case,
             )
             started = perf_counter()
             if observed_retriever is not None:
@@ -221,6 +227,7 @@ async def run_live_evaluation(
             await embedding_client.aclose()  # type: ignore[attr-defined]
         if owns_engine and engine is not None:
             await engine.dispose()
+        shutdown_langfuse(settings)
 
 
 def _select_cases(
@@ -323,9 +330,10 @@ async def _evaluation_conversation(
     *,
     user_id: UUID,
     sample_id: UUID,
+    dataset_id: str,
     case: EvaluationCase,
 ) -> UUID:
-    marker = f"sample-eval:{sample_id}:{case.case_id}"
+    marker = f"sample-eval:{dataset_id}:{sample_id}:{case.case_id}"
     async with session_factory.begin() as session:
         conversation = await session.scalar(
             select(Conversation).where(

@@ -154,6 +154,7 @@ activemq-data/
 .env.*
 !.env.example
 .envrc
+tmp-api-key-private.txt
 .local-data/
 .venv
 env/
