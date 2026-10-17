@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from rag_assistant.db.models import ParagraphKind
+
+
+class RetrievalRequest(BaseModel):
+    """Internal request for evidence within one user's conversation scope."""
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: UUID
+    conversation_id: UUID
+    question: str
+    top_k: int = Field(default=6, ge=1, le=20)
+    minimum_similarity: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+class CitationSource(BaseModel):
+    """An authoritative persisted citation unit represented by a retrieved chunk."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_paragraph_id: UUID
+    document_id: UUID
+    document_version_id: UUID
+    document_title: str
+    page_number: int = Field(ge=1)
+    paragraph_number: int = Field(ge=1)
+    kind: ParagraphKind
+    original_text: str
+    start_offset: int | None = Field(default=None, ge=0)
+    end_offset: int | None = Field(default=None, ge=1)
+
+
+class EvidenceChunk(BaseModel):
+    """A ranked retrieval chunk and its complete citation provenance."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_id: UUID
+    document_id: UUID
+    document_version_id: UUID
+    document_title: str
+    chunk_ordinal: int = Field(ge=1)
+    normalized_text: str
+    token_count: int = Field(ge=1)
+    cosine_similarity: float
+    citation_sources: tuple[CitationSource, ...] = Field(min_length=1)
+
+
+class RetrievalResult(BaseModel):
+    """Authorized evidence returned for a normalized query."""
+
+    model_config = ConfigDict(frozen=True)
+
+    normalized_query: str
+    embedding_model: str
+    embedding_dimensions: int = Field(ge=1)
+    evidence: tuple[EvidenceChunk, ...]
