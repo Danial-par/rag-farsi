@@ -45,6 +45,9 @@
 
 - The approved sample PDF is a non-sensitive, redistributable test fixture and belongs under `tests/fixtures/documents/`.
 - Store production source PDFs as immutable objects in private S3-compatible object storage.
+- Accept authenticated API-mediated PDF uploads up to 25 MiB; generate object keys, hashes, sizes, and ownership server-side.
+- Run ingestion in a database-polling worker; users may retry any failed version that has never been active.
+- Periodically remove source objects older than the reconciliation grace period when no version row references them.
 - Store each source object's owner, object key, content hash, ingestion status, and extraction metadata in PostgreSQL.
 - Access models through OpenRouter's OpenAI-compatible API using `OPENROUTER_API_KEY`.
 - Default to `openai/gpt-6-luna` for chat and `openai/text-embedding-3-large` with 1024 dimensions for embeddings.

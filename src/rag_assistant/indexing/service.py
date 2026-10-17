@@ -39,7 +39,7 @@ from rag_assistant.indexing.embeddings import (
     RetryableEmbeddingError,
     embed_in_batches,
 )
-from rag_assistant.indexing.storage import ObjectStore, ObjectStoreError
+from rag_assistant.indexing.storage import ObjectReader, ObjectStoreError
 
 
 class SourceIntegrityError(RuntimeError):
@@ -61,7 +61,7 @@ class DocumentIndexingService:
         self,
         *,
         session_factory: AsyncSessionFactory,
-        object_store: ObjectStore,
+        object_store: ObjectReader,
         embedding_client: EmbeddingClient,
         settings: Settings,
         extractor: PdfExtractor | None = None,
@@ -79,6 +79,13 @@ class DocumentIndexingService:
     async def index_version(self, version_id: UUID) -> IndexingResult:
         started = perf_counter()
         claim = await self._claim(version_id)
+        return await self._run_claim(claim, started=started)
+
+    async def index_claim(self, claim: IngestionClaim) -> IndexingResult:
+        """Run an attempt already claimed by the durable polling worker."""
+        return await self._run_claim(claim, started=perf_counter())
+
+    async def _run_claim(self, claim: IngestionClaim, *, started: float) -> IndexingResult:
         log = self._logger.bind(
             document_id=str(claim.document_id),
             document_version_id=str(claim.version_id),

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 def test_migration_history_has_one_head() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert scripts.get_heads() == ["20261017_0006"]
+    assert scripts.get_heads() == ["20261017_0007"]
 
 
 def test_migration_matches_model_metadata(migrated_database_url: str) -> None:
@@ -48,7 +48,7 @@ async def test_migrations_upgrade_empty_postgres_to_head(migrated_database_url: 
     finally:
         await engine.dispose()
 
-    assert revision == "20261017_0006"
+    assert revision == "20261017_0007"
     assert vector_enabled is True
     assert lease_columns == {"processing_attempt_id", "processing_lease_expires_at"}
     assert {

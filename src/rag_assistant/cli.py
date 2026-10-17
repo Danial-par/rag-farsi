@@ -13,11 +13,10 @@ from rag_assistant.core.logging import configure_logging
 from rag_assistant.db.session import create_database_resources
 from rag_assistant.indexing import (
     DocumentIndexingService,
-    LocalObjectStore,
-    ObjectStore,
     OpenRouterEmbeddingClient,
-    S3ObjectStore,
+    create_object_store,
 )
+from rag_assistant.indexing.worker import DocumentIngestionWorker
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,28 +46,6 @@ def _ingestion_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _object_store(settings: Settings) -> ObjectStore:
-    if settings.object_store_backend == "local":
-        if settings.app_env == "production":
-            raise ValueError("Production ingestion requires OBJECT_STORE_BACKEND=s3")
-        return LocalObjectStore(settings.local_object_store_root)
-    if settings.s3_bucket is None:
-        raise ValueError("S3_BUCKET is required when OBJECT_STORE_BACKEND=s3")
-    return S3ObjectStore(
-        bucket=settings.s3_bucket,
-        endpoint_url=str(settings.s3_endpoint_url) if settings.s3_endpoint_url else None,
-        region=settings.s3_region,
-        access_key_id=(
-            settings.s3_access_key_id.get_secret_value() if settings.s3_access_key_id else None
-        ),
-        secret_access_key=(
-            settings.s3_secret_access_key.get_secret_value()
-            if settings.s3_secret_access_key
-            else None
-        ),
-    )
-
-
 async def _ingest_version(version_id: UUID, settings: Settings) -> None:
     if settings.openrouter_api_key is None:
         raise ValueError("OPENROUTER_API_KEY is required by rag-ingest")
@@ -82,7 +59,7 @@ async def _ingest_version(version_id: UUID, settings: Settings) -> None:
     try:
         service = DocumentIndexingService(
             session_factory=session_factory,
-            object_store=_object_store(settings),
+            object_store=create_object_store(settings),
             embedding_client=embedding_client,
             settings=settings,
         )
@@ -101,3 +78,39 @@ def ingest(argv: Sequence[str] | None = None) -> None:
         _ingest_version(args.version_id, settings),
         loop_factory=compatible_event_loop_factory,
     )
+
+
+async def _run_worker(settings: Settings) -> None:
+    if settings.openrouter_api_key is None:
+        raise ValueError("OPENROUTER_API_KEY is required by rag-worker")
+    engine, session_factory = create_database_resources(settings)
+    embedding_client = OpenRouterEmbeddingClient(
+        base_url=str(settings.openrouter_base_url),
+        api_key=settings.openrouter_api_key.get_secret_value(),
+        connect_timeout_seconds=settings.embedding_connect_timeout_seconds,
+        read_timeout_seconds=settings.embedding_read_timeout_seconds,
+    )
+    try:
+        object_store = create_object_store(settings)
+        indexing_service = DocumentIndexingService(
+            session_factory=session_factory,
+            object_store=object_store,
+            embedding_client=embedding_client,
+            settings=settings,
+        )
+        await DocumentIngestionWorker(
+            session_factory=session_factory,
+            object_store=object_store,
+            indexing_service=indexing_service,
+            settings=settings,
+        ).run_forever()
+    finally:
+        await embedding_client.aclose()
+        await engine.dispose()
+
+
+def worker() -> None:
+    """Run the restart-safe database polling ingestion worker."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    asyncio.run(_run_worker(settings), loop_factory=compatible_event_loop_factory)

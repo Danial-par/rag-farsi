@@ -33,6 +33,7 @@ dependencies = [
 [project.scripts]
 rag-api = "rag_assistant.cli:run"
 rag-ingest = "rag_assistant.cli:ingest"
+rag-worker = "rag_assistant.cli:worker"
 
 [dependency-groups]
 dev = [

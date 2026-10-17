@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from rag_assistant.db.base import utc_now
 from rag_assistant.db.models import (
@@ -37,6 +38,7 @@ class NewDocumentVersion:
     file_size_bytes: int
     embedding_model: str
     embedding_dimensions: int
+    version_id: UUID | None = None
     media_type: str = "application/pdf"
     ingestion_config: dict[str, Any] = field(default_factory=dict)
 
@@ -93,8 +95,10 @@ class DocumentRepository:
         owner_id: UUID,
         title: str,
         metadata: dict[str, Any] | None = None,
+        document_id: UUID | None = None,
     ) -> Document:
         document = Document(
+            id=document_id or uuid4(),
             owner_id=owner_id,
             title=title,
             is_shared=False,
@@ -126,13 +130,30 @@ class DocumentRepository:
 
     async def get_owned(self, *, owner_id: UUID, document_id: UUID) -> Document | None:
         return await self._session.scalar(
-            select(Document).where(
+            select(Document)
+            .options(selectinload(Document.versions))
+            .execution_options(populate_existing=True)
+            .where(
                 Document.id == document_id,
                 Document.owner_id == owner_id,
                 Document.is_shared.is_(False),
                 Document.deleted_at.is_(None),
             )
         )
+
+    async def list_owned(self, *, owner_id: UUID, limit: int) -> list[Document]:
+        rows = await self._session.scalars(
+            select(Document)
+            .options(selectinload(Document.versions))
+            .where(
+                Document.owner_id == owner_id,
+                Document.is_shared.is_(False),
+                Document.deleted_at.is_(None),
+            )
+            .order_by(Document.updated_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+        return list(rows)
 
     async def get_accessible(self, *, user_id: UUID, document_id: UUID) -> Document | None:
         return await self._session.scalar(
@@ -193,6 +214,7 @@ class DocumentRepository:
             )
         )
         version = DocumentVersion(
+            id=values.version_id or uuid4(),
             document_id=document.id,
             version_number=(latest_number or 0) + 1,
             object_key=values.object_key,
@@ -206,6 +228,7 @@ class DocumentRepository:
             status=IngestionStatus.PENDING,
         )
         self._session.add(version)
+        document.updated_at = utc_now()
         await self._session.flush()
         return version
 
@@ -268,6 +291,87 @@ class DocumentRepository:
             embedding_model=version.embedding_model,
             embedding_dimensions=version.embedding_dimensions,
         )
+
+    async def claim_next_for_indexing(
+        self, *, lease_duration: timedelta
+    ) -> IngestionClaim | None:
+        """Claim one pending or abandoned version under a skip-locked row lock."""
+        now = utc_now()
+        version = await self._session.scalar(
+            select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(
+                Document.deleted_at.is_(None),
+                or_(
+                    DocumentVersion.status == IngestionStatus.PENDING,
+                    (
+                        (DocumentVersion.status == IngestionStatus.PROCESSING)
+                        & (DocumentVersion.processing_lease_expires_at <= now)
+                    ),
+                ),
+                DocumentVersion.activated_at.is_(None),
+            )
+            .order_by(DocumentVersion.created_at, DocumentVersion.id)
+            .with_for_update(of=DocumentVersion, skip_locked=True)
+            .limit(1)
+        )
+        if version is None:
+            return None
+        attempt_id = uuid4()
+        version.status = IngestionStatus.PROCESSING
+        version.started_at = now
+        version.completed_at = None
+        version.failed_at = None
+        version.failure_code = None
+        version.failure_message = None
+        version.processing_attempt_id = attempt_id
+        version.processing_lease_expires_at = now + lease_duration
+        await self._session.execute(delete(Chunk).where(Chunk.document_version_id == version.id))
+        await self._session.flush()
+        return IngestionClaim(
+            version_id=version.id,
+            document_id=version.document_id,
+            attempt_id=attempt_id,
+            object_key=version.object_key,
+            content_hash=version.content_hash,
+            file_size_bytes=version.file_size_bytes,
+            media_type=version.media_type,
+            embedding_model=version.embedding_model,
+            embedding_dimensions=version.embedding_dimensions,
+        )
+
+    async def request_retry_owned(
+        self, *, owner_id: UUID, document_id: UUID, version_id: UUID
+    ) -> DocumentVersion:
+        document = await self._locked_owned_document(owner_id, document_id)
+        version = await self._session.scalar(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document.id,
+            )
+            .with_for_update()
+        )
+        if version is None:
+            raise RecordNotFoundError("Document version not found")
+        if version.status is not IngestionStatus.FAILED or version.activated_at is not None:
+            raise InvalidPersistenceStateError("Only failed, never-active versions can be retried")
+        version.status = IngestionStatus.PENDING
+        version.started_at = None
+        version.failed_at = None
+        version.failure_code = None
+        version.failure_message = None
+        version.extraction_metadata = {}
+        await self._session.flush()
+        return version
+
+    async def persisted_object_keys(self, object_keys: Sequence[str]) -> set[str]:
+        if not object_keys:
+            return set()
+        rows = await self._session.scalars(
+            select(DocumentVersion.object_key).where(DocumentVersion.object_key.in_(object_keys))
+        )
+        return set(rows)
 
     async def renew_ingestion_lease(
         self,

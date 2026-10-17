@@ -51,10 +51,21 @@ def test_secure_cookies_are_environment_aware() -> None:
         app_env="production",
         database_url="postgresql+psycopg://user:password@localhost/database",
         jwt_secret=JWT_SECRET,
+        object_store_backend="s3",
+        s3_bucket="private-test-bucket",
     )
 
     assert local.secure_cookies is False
     assert production.secure_cookies is True
+
+
+def test_production_requires_private_s3_storage() -> None:
+    with pytest.raises(ValidationError, match="OBJECT_STORE_BACKEND=s3"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+psycopg://user:password@localhost/database",
+            jwt_secret=JWT_SECRET,
+        )
 
 
 def test_chunk_target_cannot_exceed_hard_maximum() -> None:

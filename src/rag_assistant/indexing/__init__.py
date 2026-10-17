@@ -19,6 +19,7 @@ from rag_assistant.indexing.embeddings import (
     RetryableEmbeddingError,
     embed_in_batches,
 )
+from rag_assistant.indexing.factory import create_object_store
 from rag_assistant.indexing.service import (
     DocumentIndexingService,
     IndexingResult,
@@ -54,4 +55,5 @@ __all__ = [
     "SourceIntegrityError",
     "TiktokenTokenCounter",
     "embed_in_batches",
+    "create_object_store",
 ]

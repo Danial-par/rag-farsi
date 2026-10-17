@@ -157,6 +157,12 @@ class DocumentVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, Base)
         Index("ix_document_versions_content_hash", "content_hash"),
         Index("ix_document_versions_processing_lease", "status", "processing_lease_expires_at"),
         Index(
+            "ix_document_versions_worker_queue",
+            "created_at",
+            "id",
+            postgresql_where=text("status IN ('pending', 'processing') AND activated_at IS NULL"),
+        ),
+        Index(
             "ix_document_versions_embedding_configuration",
             "embedding_model",
             "embedding_dimensions",

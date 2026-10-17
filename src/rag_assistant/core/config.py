@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(default=600, ge=32, le=8192)
     chunk_paragraph_overlap: int = Field(default=1, ge=0, le=1)
     ingestion_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    ingestion_poll_seconds: float = Field(default=2, gt=0, le=60)
+    orphan_object_grace_seconds: int = Field(default=86400, ge=60, le=604800)
+    orphan_reconcile_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    max_pdf_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=25 * 1024 * 1024)
 
     object_store_backend: Literal["local", "s3"] = "local"
     local_object_store_root: Path = Path(".")
@@ -80,6 +84,10 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_TARGET_TOKENS cannot exceed CHUNK_MAX_TOKENS")
         if (self.langfuse_public_key is None) != (self.langfuse_secret_key is None):
             raise ValueError("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must be set together")
+        if self.app_env == "production" and self.object_store_backend != "s3":
+            raise ValueError("Production requires OBJECT_STORE_BACKEND=s3")
+        if self.app_env == "production" and not self.s3_bucket:
+            raise ValueError("S3_BUCKET is required in production")
         return self
 
     @property

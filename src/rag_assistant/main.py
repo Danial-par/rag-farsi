@@ -23,6 +23,7 @@ from rag_assistant.core.config import Settings, get_settings
 from rag_assistant.core.logging import RequestContextMiddleware, configure_logging
 from rag_assistant.core.security import PasswordManager, TokenManager
 from rag_assistant.db.session import AsyncSessionFactory, create_database_resources
+from rag_assistant.indexing import create_object_store
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, RetrievalService
 
@@ -99,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = resolved_settings
+    application.state.object_store = create_object_store(resolved_settings)
     application.state.database_engine = engine
     application.state.session_factory = session_factory
     application.state.password_manager = PasswordManager()
