@@ -72,6 +72,7 @@
           <div id="conversation-view" class="conversation-view" hidden>
             <div class="conversation-title-row">
               <h1 id="active-title">گفتگو</h1>
+              <button id="rename-conversation" class="quiet-button rename-button" type="button" aria-label="تغییر نام گفتگو" hidden>تغییر نام</button>
               <button id="older-messages" class="quiet-button" type="button" hidden>پیام‌های قدیمی‌تر</button>
             </div>
             <div id="message-list" class="message-list" aria-live="polite" aria-relevant="additions text"></div>
@@ -85,6 +86,17 @@
           </div>
         </section>
       </div>
+      <dialog id="rename-dialog" class="rename-dialog" aria-labelledby="rename-title">
+        <form id="rename-form">
+          <h2 id="rename-title">تغییر نام گفتگو</h2>
+          <label for="rename-input">نام گفتگو</label>
+          <input id="rename-input" name="title" type="text" maxlength="80" required autocomplete="off">
+          <div class="dialog-actions">
+            <button id="rename-cancel" class="quiet-button" type="button">انصراف</button>
+            <button class="primary" type="submit">ذخیره نام</button>
+          </div>
+        </form>
+      </dialog>
     </div>
   </body>
 </html>

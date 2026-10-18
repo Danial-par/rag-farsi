@@ -3,7 +3,7 @@
 
   const API = "/api/v1";
   const el = (id) => document.getElementById(id);
-  const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false };
+  const state = { user: null, conversations: [], documents: [], current: null, names: {}, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false };
   const unsafeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
   function csrfToken() {
@@ -72,6 +72,26 @@
     if (className) node.className = className;
     node.textContent = value == null ? "" : String(value);
     return node;
+  }
+
+  function conversationTitle(conversation) {
+    return state.names[conversation.id] || conversation.title || "گفتگوی تازه";
+  }
+
+  function namesStorageKey() {
+    return `rag-conversation-names:${String(state.user?.email || "guest").toLocaleLowerCase()}`;
+  }
+
+  function loadConversationNames() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(namesStorageKey()) || "{}");
+      state.names = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+    } catch (_) { state.names = {}; }
+  }
+
+  function saveConversationNames() {
+    try { localStorage.setItem(namesStorageKey(), JSON.stringify(state.names)); }
+    catch (_) { announce("نام گفتگو در این مرورگر ذخیره نشد.", "error"); }
   }
 
   function appendAnswerText(node, value, citations = [], citationCards = []) {
@@ -178,9 +198,9 @@
   function renderConversations() {
     const list = el("conversation-list"); list.replaceChildren();
     const query = el("conversation-search").value.trim().toLocaleLowerCase();
-    const filtered = state.conversations.filter((conversation) => String(conversation.title || "گفتگوی تازه").toLocaleLowerCase().includes(query));
+    const filtered = state.conversations.filter((conversation) => conversationTitle(conversation).toLocaleLowerCase().includes(query));
     for (const conversation of filtered) {
-      const button = text("button", conversation.title || "گفتگوی تازه", `conversation-item${state.current?.id === conversation.id ? " active" : ""}`);
+      const button = text("button", conversationTitle(conversation), `conversation-item${state.current?.id === conversation.id ? " active" : ""}`);
       button.type = "button"; button.setAttribute("aria-current", state.current?.id === conversation.id ? "page" : "false");
       button.disabled = state.sending;
       button.addEventListener("click", () => openConversation(conversation.id)); list.append(button);
@@ -198,7 +218,8 @@
     state.selected = new Set(state.current.selected_documents.map((doc) => doc.id));
     state.cursor = null; state.retry = null;
     el("welcome").hidden = true; el("conversation-view").hidden = false;
-    el("active-title").textContent = state.current.title || "گفتگوی تازه";
+    el("active-title").textContent = conversationTitle(state.current);
+    el("rename-conversation").hidden = false;
     el("message-list").replaceChildren(); announce("");
     const draft = sessionStorage.getItem(draftKey(id)) || "";
     el("question-input").value = draft;
@@ -227,7 +248,7 @@
       target.prepend(fragment); target.scrollTop = target.scrollHeight - beforeHeight;
     } else {
       const fragment = document.createDocumentFragment(); chronological.forEach((message) => fragment.append(renderMessage(message)));
-      target.append(fragment); target.scrollTop = target.scrollHeight;
+      target.append(fragment); scrollMessagesToLatest(target);
     }
   }
 
@@ -283,7 +304,7 @@
       target.append(renderMessage({ role: "user", content: question }));
       target.append(waiting);
     }
-    target.scrollTop = target.scrollHeight;
+    scrollMessagesToLatest(target);
     try {
       const answer = await api(`/conversations/${conversationId}/messages`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ content: question }) });
       waiting.replaceWith(renderMessage(answer)); state.retry = null; sessionStorage.removeItem(draftKey(conversationId)); input.value = ""; announce("");
@@ -296,7 +317,15 @@
       waiting.replaceWith(failure);
       const retry = text("button", pending ? "بررسی دوباره همین پرسش" : "تلاش دوباره برای همین پرسش", "retry-button"); retry.type = "button"; retry.addEventListener("click", () => submitQuestion(state.retry.question, state.retry.idempotencyKey, failure)); failure.append(retry);
       announce(pending ? "درخواست هنوز در حال اجراست؛ بررسی دوباره از همان شناسه درخواست استفاده می‌کند." : "اجرای پاسخ کامل نشد. در صورت تلاش دوباره، همان کلید درخواست استفاده می‌شود.", pending ? "" : "error");
-    } finally { state.sending = false; if (state.retry && input.value === "") { input.value = question; sessionStorage.setItem(draftKey(conversationId), question); } resizeComposer(); updateComposer(); renderDocuments(); renderConversations(); target.scrollTop = target.scrollHeight; }
+    } finally { state.sending = false; if (state.retry && input.value === "") { input.value = question; sessionStorage.setItem(draftKey(conversationId), question); } resizeComposer(); updateComposer(); renderDocuments(); renderConversations(); scrollMessagesToLatest(target); }
+  }
+
+  function scrollMessagesToLatest(target) {
+    requestAnimationFrame(() => {
+      target.style.scrollBehavior = "auto";
+      target.scrollTop = target.scrollHeight;
+      requestAnimationFrame(() => target.style.removeProperty("scroll-behavior"));
+    });
   }
 
   function draftKey(id) { return `rag-draft:${id}`; }
@@ -381,6 +410,24 @@
   el("new-conversation").addEventListener("click", () => createConversation().catch((error) => announce(error.message, "error")));
   el("welcome-new").addEventListener("click", () => createConversation().catch((error) => announce(error.message, "error")));
   el("older-messages").addEventListener("click", () => loadHistory(true).catch((error) => announce(error.message, "error")));
+  el("rename-conversation").addEventListener("click", () => {
+    if (!state.current) return;
+    el("rename-input").value = conversationTitle(state.current);
+    el("rename-dialog").showModal();
+    el("rename-input").focus();
+    el("rename-input").select();
+  });
+  el("rename-cancel").addEventListener("click", () => el("rename-dialog").close());
+  el("rename-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const title = el("rename-input").value.trim();
+    if (!title || !state.current) return;
+    state.names[state.current.id] = title;
+    saveConversationNames();
+    el("active-title").textContent = title;
+    renderConversations();
+    el("rename-dialog").close();
+  });
   el("chat-form").addEventListener("submit", (event) => {
     event.preventDefault(); const input = el("question-input"); const question = input.value.trim();
     if (!question || !state.current) return;
@@ -410,9 +457,10 @@
 
   async function startApp() {
     showApp(); el("user-email").textContent = state.user?.email || "";
+    loadConversationNames();
     await Promise.all([loadConversations(), loadDocuments()]); await loadCurrent();
     if (state.conversations.length) await openConversation(state.conversations[0].id);
-    else { el("conversation-view").hidden = true; el("welcome").hidden = false; }
+    else { el("conversation-view").hidden = true; el("welcome").hidden = false; el("rename-conversation").hidden = true; }
   }
 
   (async function restoreSession() {
