@@ -3,7 +3,7 @@
 
   const API = "/api/v1";
   const el = (id) => document.getElementById(id);
-  const state = { user: null, conversations: [], documents: [], current: null, names: {}, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false };
+  const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false, renaming: false };
   const unsafeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
   function csrfToken() {
@@ -75,23 +75,7 @@
   }
 
   function conversationTitle(conversation) {
-    return state.names[conversation.id] || conversation.title || "گفتگوی تازه";
-  }
-
-  function namesStorageKey() {
-    return `rag-conversation-names:${String(state.user?.email || "guest").toLocaleLowerCase()}`;
-  }
-
-  function loadConversationNames() {
-    try {
-      const stored = JSON.parse(localStorage.getItem(namesStorageKey()) || "{}");
-      state.names = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
-    } catch (_) { state.names = {}; }
-  }
-
-  function saveConversationNames() {
-    try { localStorage.setItem(namesStorageKey(), JSON.stringify(state.names)); }
-    catch (_) { announce("نام گفتگو در این مرورگر ذخیره نشد.", "error"); }
+    return conversation.title || "گفتگوی تازه";
   }
 
   function appendAnswerText(node, value, citations = [], citationCards = []) {
@@ -413,6 +397,7 @@
   el("rename-conversation").addEventListener("click", () => {
     if (!state.current) return;
     el("rename-input").value = conversationTitle(state.current);
+    el("rename-error").hidden = true;
     el("rename-dialog").showModal();
     el("rename-input").focus();
     el("rename-input").select();
@@ -421,12 +406,36 @@
   el("rename-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const title = el("rename-input").value.trim();
-    if (!title || !state.current) return;
-    state.names[state.current.id] = title;
-    saveConversationNames();
-    el("active-title").textContent = title;
-    renderConversations();
-    el("rename-dialog").close();
+    if (state.renaming || !title || !state.current) return;
+    const conversationId = state.current.id;
+    state.renaming = true;
+    const submit = el("rename-form").querySelector("button[type=submit]");
+    submit.disabled = true;
+    el("rename-input").disabled = true;
+    el("rename-cancel").disabled = true;
+    api(`/conversations/${conversationId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).then((updated) => {
+      state.current.title = updated.title;
+      state.current.updated_at = updated.updated_at;
+      const item = state.conversations.find((conversation) => conversation.id === conversationId);
+      if (item) { item.title = updated.title; item.updated_at = updated.updated_at; }
+      state.conversations.sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.id.localeCompare(left.id));
+      el("active-title").textContent = updated.title;
+      renderConversations();
+      el("rename-dialog").close();
+      announce("نام گفتگو ذخیره شد.", "success");
+    }).catch((error) => {
+      el("rename-error").textContent = error.message;
+      el("rename-error").hidden = false;
+    }).finally(() => {
+      state.renaming = false;
+      submit.disabled = false;
+      el("rename-input").disabled = false;
+      el("rename-cancel").disabled = false;
+    });
   });
   el("chat-form").addEventListener("submit", (event) => {
     event.preventDefault(); const input = el("question-input"); const question = input.value.trim();
@@ -457,7 +466,6 @@
 
   async function startApp() {
     showApp(); el("user-email").textContent = state.user?.email || "";
-    loadConversationNames();
     await Promise.all([loadConversations(), loadDocuments()]); await loadCurrent();
     if (state.conversations.length) await openConversation(state.conversations[0].id);
     else { el("conversation-view").hidden = true; el("welcome").hidden = false; el("rename-conversation").hidden = true; }

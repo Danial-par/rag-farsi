@@ -90,7 +90,8 @@
         <form id="rename-form">
           <h2 id="rename-title">تغییر نام گفتگو</h2>
           <label for="rename-input">نام گفتگو</label>
-          <input id="rename-input" name="title" type="text" maxlength="80" required autocomplete="off">
+          <input id="rename-input" name="title" type="text" maxlength="500" required autocomplete="off">
+          <p id="rename-error" class="notice error" role="alert" hidden></p>
           <div class="dialog-actions">
             <button id="rename-cancel" class="quiet-button" type="button">انصراف</button>
             <button class="primary" type="submit">ذخیره نام</button>

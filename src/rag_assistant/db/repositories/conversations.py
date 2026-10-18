@@ -280,6 +280,14 @@ class ConversationRepository:
         await self._session.flush()
         return conversation
 
+    async def rename(self, *, owner_id: UUID, conversation_id: UUID, title: str) -> Conversation:
+        """Change the title of a live conversation owned by this user."""
+        conversation = await self._locked_owned_conversation(owner_id, conversation_id)
+        conversation.title = title
+        conversation.updated_at = utc_now()
+        await self._session.flush()
+        return conversation
+
     async def get_owned(
         self, *, owner_id: UUID, conversation_id: UUID, include_messages: bool = False
     ) -> Conversation | None:

@@ -157,6 +157,61 @@ async def test_conversation_read_is_owner_scoped_and_lists_with_cursor(
     assert hidden.status_code == 404
 
 
+async def test_conversation_rename_persists_and_is_owner_scoped(
+    database_client: AsyncClient,
+) -> None:
+    await _register(database_client, "chat-rename-owner@example.com")
+    created = await database_client.post(
+        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
+    )
+    conversation_id = created.json()["id"]
+    missing_csrf = await database_client.patch(
+        f"/api/v1/conversations/{conversation_id}", json={"title": "تغییر نام"}
+    )
+    assert missing_csrf.status_code == 403
+
+    renamed = await database_client.patch(
+        f"/api/v1/conversations/{conversation_id}",
+        json={"title": "  پژوهش‌های من  "},
+        headers=_csrf_header(database_client),
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "پژوهش‌های من"
+    assert renamed.json()["updated_at"] >= created.json()["updated_at"]
+    persisted = await database_client.get(f"/api/v1/conversations/{conversation_id}")
+    assert persisted.status_code == 200
+    assert persisted.json()["title"] == "پژوهش‌های من"
+
+    await _register(database_client, "chat-rename-other@example.com")
+    forbidden = await database_client.patch(
+        f"/api/v1/conversations/{conversation_id}",
+        json={"title": "نام دیگر"},
+        headers=_csrf_header(database_client),
+    )
+    assert forbidden.status_code == 404
+
+
+async def test_conversation_rename_rejects_blank_or_oversized_title(
+    database_client: AsyncClient,
+) -> None:
+    await _register(database_client, "chat-rename-validation@example.com")
+    created = await database_client.post(
+        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
+    )
+    conversation_id = created.json()["id"]
+    headers = _csrf_header(database_client)
+
+    blank = await database_client.patch(
+        f"/api/v1/conversations/{conversation_id}", json={"title": "  "}, headers=headers
+    )
+    oversized = await database_client.patch(
+        f"/api/v1/conversations/{conversation_id}", json={"title": "x" * 501}, headers=headers
+    )
+
+    assert blank.status_code == oversized.status_code == 422
+
+
 async def test_document_selection_replaces_explicit_ids_and_checks_access(
     database_client: AsyncClient,
     database_connection: AsyncConnection,

@@ -48,6 +48,20 @@ class ConversationCreate(BaseModel):
         return value
 
 
+class ConversationTitleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=500)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        title = value.strip()
+        if not title:
+            raise ValueError("Title cannot be blank")
+        return title
+
+
 class DocumentSelectionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -211,6 +225,27 @@ async def read_conversation(
         **ConversationSummary.from_conversation(conversation).model_dump(),
         selected_documents=[DocumentSummary.from_document(doc) for doc in documents],
     )
+
+
+@router.patch("/{conversation_id}", response_model=ConversationSummary)
+async def rename_conversation(
+    conversation_id: UUID,
+    payload: ConversationTitleUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    response: Response,
+) -> ConversationSummary:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        conversation = await ConversationRepository(session).rename(
+            owner_id=user.id,
+            conversation_id=conversation_id,
+            title=payload.title,
+        )
+    except RecordNotFoundError as exc:
+        raise _not_found() from exc
+    await session.commit()
+    return ConversationSummary.from_conversation(conversation)
 
 
 @router.put("/{conversation_id}/documents", response_model=list[DocumentSummary])

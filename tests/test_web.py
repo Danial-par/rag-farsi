@@ -59,8 +59,8 @@ def test_browser_client_obeys_security_and_chat_contracts() -> None:
     assert "prefers-reduced-motion: reduce" in (WEB_ROOT / "static" / "app.css").read_text(
         encoding="utf-8"
     )
-    assert "rag-conversation-names:" in script
-    assert "localStorage.setItem(namesStorageKey()" in script
+    assert 'method: "PATCH"' in script
+    assert "item.title = updated.title" in script
     assert "scrollMessagesToLatest(target)" in script
     template = (WEB_ROOT / "templates" / "index.html").read_text(encoding="utf-8")
     assert 'id="rename-conversation"' in template
