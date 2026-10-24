@@ -192,6 +192,27 @@ async def test_conversation_rename_persists_and_is_owner_scoped(
     assert forbidden.status_code == 404
 
 
+async def test_conversation_delete_hides_it_from_reads_and_lists(
+    database_client: AsyncClient,
+) -> None:
+    await _register(database_client, "chat-delete@example.com")
+    created = await database_client.post(
+        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
+    )
+    conversation_id = created.json()["id"]
+
+    deleted = await database_client.delete(
+        f"/api/v1/conversations/{conversation_id}", headers=_csrf_header(database_client)
+    )
+    listed = await database_client.get("/api/v1/conversations")
+    read = await database_client.get(f"/api/v1/conversations/{conversation_id}")
+
+    assert deleted.status_code == 204
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+    assert read.status_code == 404
+
+
 async def test_conversation_rename_rejects_blank_or_oversized_title(
     database_client: AsyncClient,
 ) -> None:

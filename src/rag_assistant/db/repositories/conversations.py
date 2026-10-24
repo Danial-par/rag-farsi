@@ -290,6 +290,14 @@ class ConversationRepository:
         await self._session.flush()
         return conversation
 
+    async def soft_delete(self, *, owner_id: UUID, conversation_id: UUID) -> None:
+        """Hide a conversation owned by this user while preserving its history."""
+        conversation = await self._locked_owned_conversation(owner_id, conversation_id)
+        now = utc_now()
+        conversation.deleted_at = now
+        conversation.updated_at = now
+        await self._session.flush()
+
     async def get_owned(
         self, *, owner_id: UUID, conversation_id: UUID, include_messages: bool = False
     ) -> Conversation | None:

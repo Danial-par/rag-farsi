@@ -184,10 +184,18 @@
     const query = el("conversation-search").value.trim().toLocaleLowerCase();
     const filtered = state.conversations.filter((conversation) => conversationTitle(conversation).toLocaleLowerCase().includes(query));
     for (const conversation of filtered) {
+      const row = text("div", "", "conversation-row");
       const button = text("button", conversationTitle(conversation), `conversation-item${state.current?.id === conversation.id ? " active" : ""}`);
       button.type = "button"; button.setAttribute("aria-current", state.current?.id === conversation.id ? "page" : "false");
       button.disabled = state.sending;
-      button.addEventListener("click", () => openConversation(conversation.id)); list.append(button);
+      button.addEventListener("click", () => openConversation(conversation.id));
+      const remove = text("button", "×", "conversation-delete");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `حذف ${conversationTitle(conversation)}`);
+      remove.title = "حذف گفتگو";
+      remove.disabled = state.sending && state.current?.id === conversation.id;
+      remove.addEventListener("click", () => deleteConversation(conversation.id).catch((error) => announce(error.message, "error")));
+      row.append(button, remove); list.append(row);
     }
     if (!filtered.length) list.append(text("p", state.conversations.length ? "گفتگویی با این عنوان پیدا نشد." : "هنوز گفتگویی ندارید.", "sidebar-empty"));
   }
@@ -195,6 +203,25 @@
   async function createConversation() {
     const conversation = await api("/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     state.conversations.unshift(conversation); await openConversation(conversation.id);
+  }
+
+  async function deleteConversation(id) {
+    const conversation = state.conversations.find((item) => item.id === id);
+    if (!conversation || !window.confirm(`حذف گفتگوی «${conversationTitle(conversation)}»؟`)) return;
+    await api(`/conversations/${id}`, { method: "DELETE" });
+    state.conversations = state.conversations.filter((item) => item.id !== id);
+    if (state.current?.id === id) {
+      state.current = null;
+      state.selected.clear();
+      el("conversation-view").hidden = true;
+      el("rename-conversation").hidden = true;
+      el("welcome").hidden = false;
+      el("message-list").replaceChildren();
+      if (state.conversations.length) await openConversation(state.conversations[0].id);
+      else renderDocuments();
+    }
+    renderConversations();
+    announce("گفتگو حذف شد.", "success");
   }
 
   async function openConversation(id) {

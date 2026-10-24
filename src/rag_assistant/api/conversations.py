@@ -270,6 +270,26 @@ async def rename_conversation(
     return ConversationSummary.from_conversation(conversation)
 
 
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    response: Response,
+) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        await ConversationRepository(session).soft_delete(
+            owner_id=user.id,
+            conversation_id=conversation_id,
+        )
+    except RecordNotFoundError as exc:
+        raise _not_found() from exc
+    await session.commit()
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
 @router.put("/{conversation_id}/documents", response_model=list[DocumentSummary])
 async def replace_conversation_documents(
     conversation_id: UUID,
