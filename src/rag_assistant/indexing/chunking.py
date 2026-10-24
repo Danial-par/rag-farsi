@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
@@ -10,7 +10,7 @@ import tiktoken
 
 from rag_assistant.db.models import ParagraphKind
 
-CHUNKING_VERSION = "paragraph-token-v1"
+CHUNKING_VERSION = "structure-aware-v2"
 _BOUNDARY_PATTERN = re.compile(r"[.!?؟؛:\n]\s*|\s+")
 
 
@@ -87,7 +87,7 @@ class ChunkingError(ValueError):
 
 
 class ParagraphChunker:
-    """Pack ordered source paragraphs into deterministic token-bounded chunks."""
+    """Pack source paragraphs, keeping list groups and consecutive headings together."""
 
     def __init__(
         self,
@@ -109,64 +109,100 @@ class ParagraphChunker:
     def chunk(self, paragraphs: Sequence[ChunkingParagraph]) -> list[ChunkDraft]:
         self._validate_source(paragraphs)
         chunks: list[ChunkDraft] = []
-        active_heading: _Segment | None = None
-        active_heading_used = False
-        content: list[_Segment] = []
-
-        def emit(*, allow_overlap: bool) -> None:
-            nonlocal active_heading_used, content
-            if not content:
-                return
-            chunks.append(self._build_chunk(len(chunks) + 1, active_heading, content))
-            active_heading_used = active_heading is not None
-            overlap: list[_Segment] = []
-            if allow_overlap and self._paragraph_overlap and content[-1].is_complete_paragraph:
-                overlap = [content[-1]]
-            content = overlap
-
-        for paragraph in paragraphs:
-            if paragraph.kind is ParagraphKind.HEADING:
-                emit(allow_overlap=False)
-                if active_heading is not None and not active_heading_used:
-                    chunks.append(self._build_chunk(len(chunks) + 1, None, [active_heading]))
-                active_heading = self._complete_segment(paragraph)
-                active_heading_used = False
-                continue
-
-            heading_tokens = self._context_token_count(active_heading)
-            available = self._max_tokens - heading_tokens
-            if available <= 0:
-                raise ChunkingError("A heading consumes the complete chunk token budget")
-            segments = self._segments(paragraph, available)
-            for segment in segments:
-                if any(
-                    item.paragraph.source_paragraph_id == segment.paragraph.source_paragraph_id
-                    for item in content
-                ):
-                    emit(allow_overlap=False)
-                candidate = [*content, segment]
-                candidate_tokens = self._chunk_token_count(active_heading, candidate)
-                if content and candidate_tokens > self._target_tokens:
-                    emit(allow_overlap=True)
-                    candidate = [*content, segment]
-                    candidate_tokens = self._chunk_token_count(active_heading, candidate)
-                if candidate_tokens > self._max_tokens:
-                    if content:
-                        # The retained overlap already belongs to the chunk just emitted.
-                        # Drop it when it would prevent the next paragraph from fitting.
-                        content = []
-                        candidate = [segment]
-                        candidate_tokens = self._chunk_token_count(active_heading, candidate)
-                    if candidate_tokens > self._max_tokens:
-                        raise ChunkingError("A split paragraph fragment exceeds the chunk limit")
-                content = candidate
-
-        emit(allow_overlap=False)
-        if active_heading is not None and not active_heading_used:
-            chunks.append(self._build_chunk(len(chunks) + 1, None, [active_heading]))
+        for headings, body in self._sections(paragraphs):
+            for context, content in self._pack_groups(headings, self._groups(body)):
+                chunks.append(self._build_chunk(len(chunks) + 1, context, content))
         if not chunks:
             raise ChunkingError("No non-empty chunks were produced")
         return chunks
+
+    def _sections(
+        self, paragraphs: Sequence[ChunkingParagraph]
+    ) -> Iterator[tuple[list[_Segment], list[_Segment]]]:
+        headings: list[_Segment] = []
+        body: list[_Segment] = []
+        for paragraph in paragraphs:
+            segment = self._complete_segment(paragraph)
+            if paragraph.kind is ParagraphKind.HEADING:
+                if body:
+                    yield headings, body
+                    headings, body = [], []
+                # Adjacent headings often represent a section followed by a subsection.
+                # Keep both without guessing hierarchy from unreliable PDF numbering.
+                headings.append(segment)
+            else:
+                body.append(segment)
+        if body:
+            yield headings, body
+        elif headings:
+            # A document ending in headings still needs all its source text represented.
+            yield [], headings
+
+    @staticmethod
+    def _groups(body: Sequence[_Segment]) -> list[list[_Segment]]:
+        groups: list[list[_Segment]] = []
+        index = 0
+        while index < len(body):
+            group = [body[index]]
+            index += 1
+            if group[0].paragraph.kind in {ParagraphKind.PROSE, ParagraphKind.LIST_ITEM}:
+                while index < len(body) and body[index].paragraph.kind is ParagraphKind.LIST_ITEM:
+                    group.append(body[index])
+                    index += 1
+            groups.append(group)
+        return groups
+
+    def _pack_groups(
+        self, context: list[_Segment], groups: Sequence[list[_Segment]]
+    ) -> Iterator[tuple[list[_Segment], list[_Segment]]]:
+        content: list[_Segment] = []
+        for group in groups:
+            if self._chunk_token_count(context, group) > self._max_tokens:
+                if content:
+                    yield context, content
+                    content = []
+                if len(group) == 1:
+                    fragments = self._segments(group[0].paragraph, context)
+                    for segment in fragments[:-1]:
+                        yield context, [segment]
+                    # The last fragment can share a chunk with following source units.
+                    content = [fragments[-1]]
+                else:
+                    # Split long lists at item boundaries, repeating the introduction
+                    # as source-backed context whenever it leaves room for item text.
+                    intro = group[0]
+                    prefix = [*context, intro]
+                    can_repeat_intro = intro.paragraph.kind is ParagraphKind.PROSE and all(
+                        self._tokens.count(self._join_text(prefix, []) + "\n\n" + item.text[0])
+                        <= self._max_tokens
+                        for item in group[1:]
+                    )
+                    if can_repeat_intro:
+                        yield from self._pack_groups(prefix, [[item] for item in group[1:]])
+                    else:
+                        yield from self._pack_groups(context, [[item] for item in group])
+                continue
+
+            candidate = [*content, *group]
+            candidate_tokens = self._chunk_token_count(context, candidate)
+            keep_group = len(group) > 1 and candidate_tokens <= self._max_tokens
+            if content and candidate_tokens > self._target_tokens and not keep_group:
+                yield context, content
+                last = content[-1]
+                # Repeating a lone bullet out of its list loses its defining context.
+                content = (
+                    [last]
+                    if self._paragraph_overlap
+                    and last.is_complete_paragraph
+                    and last.paragraph.kind is ParagraphKind.PROSE
+                    else []
+                )
+                candidate = [*content, *group]
+            if self._chunk_token_count(context, candidate) > self._max_tokens:
+                candidate = group  # Drop optional overlap before breaking a logical group.
+            content = candidate
+        if content:
+            yield context, content
 
     @staticmethod
     def _validate_source(paragraphs: Sequence[ChunkingParagraph]) -> None:
@@ -179,7 +215,7 @@ class ParagraphChunker:
                 raise ChunkingError("Source paragraph identifiers must be unique")
             identities.add(paragraph.source_paragraph_id)
             position = (paragraph.page_number, paragraph.paragraph_number)
-            if position <= previous_position:
+            if min(position) < 1 or position <= previous_position:
                 raise ChunkingError("Source paragraphs must be in citation order")
             previous_position = position
             if not paragraph.normalized_text.strip():
@@ -189,15 +225,18 @@ class ParagraphChunker:
     def _complete_segment(paragraph: ChunkingParagraph) -> _Segment:
         return _Segment(paragraph=paragraph, text=paragraph.normalized_text)
 
-    def _segments(self, paragraph: ChunkingParagraph, budget: int) -> list[_Segment]:
+    def _segments(
+        self, paragraph: ChunkingParagraph, context: Sequence[_Segment]
+    ) -> list[_Segment]:
         text = paragraph.normalized_text
-        if self._tokens.count(text) <= budget:
+        prefix = self._join_text(context, []) + "\n\n" if context else ""
+        if self._tokens.count(prefix + text) <= self._max_tokens:
             return [self._complete_segment(paragraph)]
 
         segments: list[_Segment] = []
         start = 0
         while start < len(text):
-            end = self._largest_fitting_end(text, start, budget)
+            end = self._largest_fitting_end(text, start, prefix)
             if end <= start:
                 raise ChunkingError("A source character cannot fit within the token budget")
             preferred = self._preferred_boundary(text, start, end)
@@ -210,7 +249,7 @@ class ParagraphChunker:
             segment_end = start + trailing
             if segment_end > segment_start:
                 segment_text = text[segment_start:segment_end]
-                if self._tokens.count(segment_text) > budget:
+                if self._tokens.count(prefix + segment_text) > self._max_tokens:
                     raise ChunkingError("A split paragraph fragment exceeds its token budget")
                 segments.append(
                     _Segment(
@@ -225,13 +264,13 @@ class ParagraphChunker:
             raise ChunkingError("An oversized paragraph produced no usable fragments")
         return segments
 
-    def _largest_fitting_end(self, text: str, start: int, budget: int) -> int:
+    def _largest_fitting_end(self, text: str, start: int, prefix: str) -> int:
         low = start + 1
         high = len(text)
         best = start
         while low <= high:
             middle = (low + high) // 2
-            if self._tokens.count(text[start:middle]) <= budget:
+            if self._tokens.count(prefix + text[start:middle]) <= self._max_tokens:
                 best = middle
                 low = middle + 1
             else:
@@ -248,22 +287,17 @@ class ParagraphChunker:
         ]
         return boundaries[-1] if boundaries else maximum_end
 
-    def _context_token_count(self, heading: _Segment | None) -> int:
-        if heading is None:
-            return 0
-        return self._tokens.count(f"{heading.text}\n\n")
-
-    def _chunk_token_count(self, heading: _Segment | None, content: Sequence[_Segment]) -> int:
-        return self._tokens.count(self._join_text(heading, content))
+    def _chunk_token_count(self, context: Sequence[_Segment], content: Sequence[_Segment]) -> int:
+        return self._tokens.count(self._join_text(context, content))
 
     def _build_chunk(
         self,
         ordinal: int,
-        heading: _Segment | None,
+        context: Sequence[_Segment],
         content: Sequence[_Segment],
     ) -> ChunkDraft:
-        segments = ([heading] if heading is not None else []) + list(content)
-        text = self._join_text(heading, content)
+        segments = [*context, *content]
+        text = self._join_text(context, content)
         token_count = self._tokens.count(text)
         if not text.strip() or token_count <= 0 or token_count > self._max_tokens:
             raise ChunkingError("A constructed chunk is empty or outside its token budget")
@@ -285,11 +319,15 @@ class ParagraphChunker:
                 "target_tokens": self._target_tokens,
                 "max_tokens": self._max_tokens,
                 "paragraph_overlap": self._paragraph_overlap,
-                "has_heading_context": heading is not None,
+                "has_heading_context": any(
+                    item.paragraph.kind is ParagraphKind.HEADING for item in context
+                ),
+                "has_list_context": any(
+                    item.paragraph.kind is ParagraphKind.PROSE for item in context
+                ),
             },
         )
 
     @staticmethod
-    def _join_text(heading: _Segment | None, content: Sequence[_Segment]) -> str:
-        parts = ([heading.text] if heading is not None else []) + [item.text for item in content]
-        return "\n\n".join(parts)
+    def _join_text(context: Sequence[_Segment], content: Sequence[_Segment]) -> str:
+        return "\n\n".join(item.text for item in (*context, *content))

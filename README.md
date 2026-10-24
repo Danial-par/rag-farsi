@@ -149,4 +149,9 @@ Run the automated test suite:
 uv run pytest
 ```
 
+For an interactive view of the current PDF chunks, use
+[`tests/notebooks/chunking_inspection.ipynb`](tests/notebooks/chunking_inspection.ipynb).
+Notebook setup and execution commands are in
+[`tests/notebooks/README.md`](tests/notebooks/README.md).
+
 If setup fails, first confirm that Docker Desktop is running, the API URL ends in `/api/v1`, and the API key supports both the configured chat and embedding models.
