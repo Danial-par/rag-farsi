@@ -19,7 +19,8 @@ from rag_assistant.extraction import (
     PdfExtractor,
     PersianTextNormalizer,
 )
-from rag_assistant.extraction.pdf import classify_source_text
+from rag_assistant.extraction.domain import BoundingBox
+from rag_assistant.extraction.pdf import _TextLine, classify_source_text
 
 SAMPLE_PDF = Path(__file__).parent / "fixtures" / "documents" / "sample_doc.pdf"
 
@@ -146,6 +147,46 @@ def test_source_classification_covers_supported_paragraph_kinds() -> None:
         classify_source_text("این یک بند عادی است.", font_size=16, body_font_size=16)
         is ParagraphKind.PROSE
     )
+
+
+@pytest.mark.parametrize("label", ["الف)", "الف.", " الف )", "ب)", "پ.", "ی)"])
+def test_persian_alphabetic_labels_form_separate_source_blocks(label: str) -> None:
+    texts = [
+        "این بند، موضوع را معرفی می‌کند.",
+        f"{label} شرایط دریافت خدمات",
+        "متقاضی باید مدارک لازم را ارائه کند.",
+        "این خط ادامه همان توضیح است.",
+    ]
+    lines = [
+        _TextLine(
+            text=value,
+            font_size=12,
+            box=BoundingBox(left=20, top=20 + index * 20, right=280, bottom=32 + index * 20),
+            fragments=(),
+        )
+        for index, value in enumerate(texts)
+    ]
+
+    blocks = PdfExtractor()._group_text_lines(lines)
+
+    assert [block.kind for block in blocks] == [
+        ParagraphKind.PROSE,
+        ParagraphKind.HEADING,
+        ParagraphKind.PROSE,
+    ]
+    assert blocks[0].original_text == texts[0]
+    assert blocks[1].original_text == texts[1].strip()
+    assert blocks[2].original_text == "\n".join(texts[2:])
+    assert blocks[1].normalized_text == PersianTextNormalizer().normalize(texts[1])
+    # Ordinary wrapped body lines still normalize into one retrieval paragraph.
+    assert blocks[2].normalized_text == " ".join(texts[2:])
+
+
+@pytest.mark.parametrize(
+    "text", ["الفبای زبان فارسی", "واژه الف در متن عادی آمده است.", "الف بدون جداکننده"]
+)
+def test_alef_inside_ordinary_text_is_not_a_heading(text: str) -> None:
+    assert classify_source_text(text, font_size=12, body_font_size=12) is ParagraphKind.PROSE
 
 
 def test_golden_persian_pdf_has_stable_page_local_citations() -> None:

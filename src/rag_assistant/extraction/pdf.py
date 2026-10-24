@@ -32,14 +32,15 @@ from rag_assistant.extraction.domain import (
 )
 from rag_assistant.extraction.normalization import PersianTextNormalizer
 
-EXTRACTION_VERSION = "pdf-source-v1"
+EXTRACTION_VERSION = "pdf-source-v2"
 LAYOUT_PROFILE = "single-column-born-digital-with-ruled-tables-v1"
 
 _DIGITS = "0-9\u0660-\u0669\u06f0-\u06f9"
 _BULLET_PATTERN = re.compile(r"^\s*[\u2022\u2023\u2043\u25aa\u25e6-]\s*")
 _NUMBERED_LIST_PATTERN = re.compile(rf"^\s*[{_DIGITS}]+[.)]\s*")
 _SECTION_NUMBER_PATTERN = re.compile(rf"^\s*[{_DIGITS}]+(?:\s*[.]\s*[{_DIGITS}]+)+\s*")
-_LETTERED_HEADING_PATTERN = re.compile(r"^\s*[اآبپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی]\s*[.)]\s*")
+# Persian's first alphabetic label is written as a word (الف), not a single letter.
+_LETTERED_HEADING_PATTERN = re.compile(r"^\s*(?:الف|[اآبپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی])\s*[.)]\s*")
 _CAPTION_PATTERN = re.compile(
     rf"^\s*(?:شکل|جدول|نمودار|تصویر|figure|table)\s*[{_DIGITS}]*\s*[:.)-]?",
     re.IGNORECASE,
