@@ -236,6 +236,57 @@
     }
   }
 
+  function citationParagraph(paragraph, cited) {
+    const block = document.createElement("div");
+    block.className = `citation-paragraph${cited ? " is-cited" : ""}`;
+    const location = `صفحه ${paragraph.page_number} · بند ${paragraph.paragraph_number}`;
+    block.append(text("div", cited ? `${location} · بند مورد استناد` : location, "citation-meta"));
+    const tag = cited ? "mark" : paragraph.kind === "heading" ? "h4" : "p";
+    block.append(text(tag, paragraph.original_text, cited ? "citation-source-highlight" : "citation-context-text"));
+    return block;
+  }
+
+  function renderCitation(citation, index, messageId, conversationId) {
+    const details = document.createElement("details");
+    details.className = "citation"; details.id = `citation-${crypto.randomUUID()}`;
+    const summary = document.createElement("summary");
+    summary.append(text("span", index + 1, "citation-number"));
+    const description = document.createElement("span"); description.className = "citation-description";
+    description.append(text("span", citation.document_title, "citation-title"));
+    description.append(text("span", `صفحه ${citation.page_number} · بند ${citation.paragraph_number}`, "citation-location"));
+    const preview = String(citation.original_text || "").replace(/\s+/g, " ").trim();
+    description.append(text("span", preview.length > 120 ? `${preview.slice(0, 120)}…` : preview, "citation-preview"));
+    summary.append(description);
+    const body = document.createElement("div"); body.className = "citation-body";
+    const heading = text("div", "متن پیرامون ارجاع", "citation-section-title");
+    const notice = text("div", "بند برجسته، متن دقیق مورد استناد است؛ متن اطراف فقط برای درک بهتر نمایش داده می‌شود.", "citation-context-note");
+    const section = document.createElement("div"); section.className = "citation-section";
+    section.append(citationParagraph(citation, true));
+    const status = text("div", "", "citation-context-status"); status.setAttribute("role", "status");
+    const copy = text("button", "کپی متن مورد استناد", "copy-button citation-copy"); copy.type = "button";
+    copy.addEventListener("click", () => copyText(citation.original_text, copy));
+    body.append(heading, notice, section, status, copy); details.append(summary, body);
+    let loaded = false; let loading = false;
+    details.addEventListener("toggle", async () => {
+      if (!details.open || loaded || loading || !messageId || !conversationId) return;
+      loading = true; section.setAttribute("aria-busy", "true"); status.textContent = "در حال دریافت متن پیرامون…";
+      try {
+        const context = await api(`/conversations/${conversationId}/messages/${messageId}/citations/${citation.source_paragraph_id}/context`);
+        // Keep the immutable snapshot visible if the context does not match this citation.
+        const cited = context.paragraphs.find((paragraph) => paragraph.is_cited);
+        if (!cited || cited.source_paragraph_id !== citation.source_paragraph_id || cited.original_text !== citation.original_text) throw new Error("Citation context mismatch");
+        section.replaceChildren(...context.paragraphs.map((paragraph) => citationParagraph(paragraph, paragraph.is_cited)));
+        heading.textContent = context.heading || "متن پیرامون ارجاع";
+        status.textContent = context.truncated ? "برای خوانایی، فقط بندهای نزدیک به ارجاع نمایش داده شده‌اند." : "";
+        loaded = true;
+        if (details.open) section.querySelector(".is-cited")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      } catch (_) {
+        status.textContent = "متن پیرامون در دسترس نیست. متن دقیق ارجاع در بالا نمایش داده شده است. برای تلاش دوباره، ارجاع را ببندید و باز کنید.";
+      } finally { loading = false; section.removeAttribute("aria-busy"); }
+    });
+    return details;
+  }
+
   function renderMessage(message) {
     const bubble = document.createElement("article"); bubble.className = `message ${message.role === "user" ? "user" : "assistant"}`;
     bubble.append(text("div", message.role === "user" ? "شما" : "دستیار", "message-label"));
@@ -255,13 +306,8 @@
     if (message.citations?.length) {
       citations = document.createElement("div"); citations.className = "citation-list";
       message.citations.forEach((citation, index) => {
-        const details = document.createElement("details"); details.className = "citation"; details.id = `citation-${crypto.randomUUID()}`; citationCards.push(details);
-        const summary = text("summary", `[${index + 1}] ${citation.document_title} · صفحه ${citation.page_number} · بند ${citation.paragraph_number}`);
-        const body = document.createElement("div"); body.className = "citation-body";
-        body.append(text("div", `صفحه فیزیکی ${citation.page_number} · بند ${citation.paragraph_number}`, "citation-meta"));
-        body.append(text("div", citation.original_text, "citation-text"));
-        const copyCitation = text("button", "کپی متن ارجاع", "copy-button citation-copy"); copyCitation.type = "button"; copyCitation.addEventListener("click", () => copyText(citation.original_text, copyCitation));
-        body.append(copyCitation); details.append(summary, body); citations.append(details);
+        const details = renderCitation(citation, index, message.id, state.current?.id);
+        citationCards.push(details); citations.append(details);
       });
     }
     const content = text("div", "", "message-content");

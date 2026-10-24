@@ -22,9 +22,11 @@ from rag_assistant.db.models import (
     Message,
     MessageRole,
     MessageStatus,
+    ParagraphKind,
     User,
 )
 from rag_assistant.db.repositories import ConversationRepository, RecordNotFoundError
+from rag_assistant.db.repositories.citation_context import read_citation_context
 from rag_assistant.db.repositories.conversations import IdempotencyConflictError
 from rag_assistant.db.session import get_db_session
 
@@ -146,6 +148,21 @@ class MessageResponse(BaseModel):
             error_message=message.error_message,
             created_at=message.created_at,
         )
+
+
+class CitationContextParagraph(BaseModel):
+    source_paragraph_id: UUID
+    page_number: int
+    paragraph_number: int
+    kind: ParagraphKind
+    original_text: str
+    is_cited: bool
+
+
+class CitationContextResponse(BaseModel):
+    heading: str | None
+    paragraphs: list[CitationContextParagraph]
+    truncated: bool
 
 
 class PageResponse[ItemT](BaseModel):
@@ -293,6 +310,49 @@ async def read_message_history(
     return PageResponse[MessageResponse](
         items=[MessageResponse.from_message(item) for item in page],
         next_cursor=_encode_cursor(page[-1].created_at, page[-1].id) if has_more and page else None,
+    )
+
+
+@router.get(
+    "/{conversation_id}/messages/{message_id}/citations/{source_paragraph_id}/context",
+    response_model=CitationContextResponse,
+)
+async def get_citation_context(
+    conversation_id: UUID,
+    message_id: UUID,
+    source_paragraph_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    response: Response,
+) -> CitationContextResponse:
+    response.headers["Cache-Control"] = "no-store"
+    context = await read_citation_context(
+        session,
+        owner_id=user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        source_paragraph_id=source_paragraph_id,
+    )
+    if context is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Citation context not found",
+            headers={"Cache-Control": "no-store"},
+        )
+    return CitationContextResponse(
+        heading=context.heading,
+        paragraphs=[
+            CitationContextParagraph(
+                source_paragraph_id=paragraph.id,
+                page_number=paragraph.page_number,
+                paragraph_number=paragraph.paragraph_number,
+                kind=paragraph.kind,
+                original_text=paragraph.original_text,
+                is_cited=paragraph.id == source_paragraph_id,
+            )
+            for paragraph in context.paragraphs
+        ],
+        truncated=context.truncated,
     )
 
 
