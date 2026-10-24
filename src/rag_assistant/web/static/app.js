@@ -240,9 +240,9 @@
     const block = document.createElement("div");
     block.className = `citation-paragraph${cited ? " is-cited" : ""}`;
     const location = `صفحه ${paragraph.page_number} · بند ${paragraph.paragraph_number}`;
-    block.append(text("div", cited ? `${location} · بند مورد استناد` : location, "citation-meta"));
-    const tag = cited ? "mark" : paragraph.kind === "heading" ? "h4" : "p";
-    block.append(text(tag, paragraph.original_text, cited ? "citation-source-highlight" : "citation-context-text"));
+    block.append(text("div", location, "citation-meta"));
+    const tag = paragraph.kind === "heading" ? "h4" : "p";
+    block.append(text(tag, paragraph.original_text, "citation-context-text"));
     return block;
   }
 
@@ -258,14 +258,12 @@
     description.append(text("span", preview.length > 120 ? `${preview.slice(0, 120)}…` : preview, "citation-preview"));
     summary.append(description);
     const body = document.createElement("div"); body.className = "citation-body";
-    const heading = text("div", "متن پیرامون ارجاع", "citation-section-title");
-    const notice = text("div", "بند برجسته، متن دقیق مورد استناد است؛ متن اطراف فقط برای درک بهتر نمایش داده می‌شود.", "citation-context-note");
     const section = document.createElement("div"); section.className = "citation-section";
     section.append(citationParagraph(citation, true));
     const status = text("div", "", "citation-context-status"); status.setAttribute("role", "status");
     const copy = text("button", "کپی متن مورد استناد", "copy-button citation-copy"); copy.type = "button";
     copy.addEventListener("click", () => copyText(citation.original_text, copy));
-    body.append(heading, notice, section, status, copy); details.append(summary, body);
+    body.append(section, status, copy); details.append(summary, body);
     let loaded = false; let loading = false;
     details.addEventListener("toggle", async () => {
       if (!details.open || loaded || loading || !messageId || !conversationId) return;
@@ -276,7 +274,6 @@
         const cited = context.paragraphs.find((paragraph) => paragraph.is_cited);
         if (!cited || cited.source_paragraph_id !== citation.source_paragraph_id || cited.original_text !== citation.original_text) throw new Error("Citation context mismatch");
         section.replaceChildren(...context.paragraphs.map((paragraph) => citationParagraph(paragraph, paragraph.is_cited)));
-        heading.textContent = context.heading || "متن پیرامون ارجاع";
         status.textContent = context.truncated ? "برای خوانایی، فقط بندهای نزدیک به ارجاع نمایش داده شده‌اند." : "";
         loaded = true;
         if (details.open) section.querySelector(".is-cited")?.scrollIntoView({ block: "nearest", behavior: "smooth" });

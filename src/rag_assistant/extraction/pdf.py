@@ -32,7 +32,7 @@ from rag_assistant.extraction.domain import (
 )
 from rag_assistant.extraction.normalization import PersianTextNormalizer
 
-EXTRACTION_VERSION = "pdf-source-v2"
+EXTRACTION_VERSION = "pdf-source-v3"
 LAYOUT_PROFILE = "single-column-born-digital-with-ruled-tables-v1"
 
 _DIGITS = "0-9\u0660-\u0669\u06f0-\u06f9"
@@ -437,13 +437,11 @@ class PdfExtractor:
         if not lines:
             return []
         body_font_size = float(median(line.font_size for line in lines))
-        top_steps = [
-            current.box.top - previous.box.top
-            for previous, current in zip(lines, lines[1:], strict=False)
-            if current.box.top > previous.box.top
-        ]
-        ordinary_step = float(median(top_steps)) if top_steps else body_font_size * 1.7
-        paragraph_gap = max(ordinary_step * 1.55, body_font_size * 2.2)
+        # Wrapped lines normally advance by less than two line-heights. A larger
+        # vertical step is paragraph spacing, even when the preceding block is a
+        # list item. This layout cue prevents a one-line item from absorbing the
+        # prose that follows it without relying on document-specific vocabulary.
+        paragraph_gap = body_font_size * 2.0
 
         blocks: list[_RawBlock] = []
         index = 0

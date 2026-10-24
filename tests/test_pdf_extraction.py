@@ -189,6 +189,35 @@ def test_alef_inside_ordinary_text_is_not_a_heading(text: str) -> None:
     assert classify_source_text(text, font_size=12, body_font_size=12) is ParagraphKind.PROSE
 
 
+def test_paragraph_spacing_separates_prose_after_wrapped_list_items() -> None:
+    texts_and_tops = [
+        ("• گزینه‌ای با توضیح", 20),
+        ("که در خط بعد ادامه دارد", 40),
+        ("این بند مستقل بعد از فهرست است.", 68),
+        ("و این خط ادامه همان بند است.", 88),
+    ]
+    lines = [
+        _TextLine(
+            text=text,
+            font_size=12,
+            box=BoundingBox(left=20, top=top, right=280, bottom=top + 12),
+            fragments=(),
+        )
+        for text, top in texts_and_tops
+    ]
+
+    blocks = PdfExtractor()._group_text_lines(lines)
+
+    assert [block.kind for block in blocks] == [
+        ParagraphKind.LIST_ITEM,
+        ParagraphKind.PROSE,
+    ]
+    assert blocks[0].original_text == "• گزینه‌ای با توضیح\nکه در خط بعد ادامه دارد"
+    assert blocks[1].original_text == (
+        "این بند مستقل بعد از فهرست است.\nو این خط ادامه همان بند است."
+    )
+
+
 def test_golden_persian_pdf_has_stable_page_local_citations() -> None:
     payload = SAMPLE_PDF.read_bytes()
     extractor = PdfExtractor()
@@ -216,6 +245,26 @@ def test_golden_persian_pdf_has_stable_page_local_citations() -> None:
         ParagraphKind.PROSE,
         ParagraphKind.LIST_ITEM,
     }
+    page_six = first.pages[5]
+    assert [(block.kind, block.normalized_text) for block in page_six.blocks[2:10]] == [
+        (ParagraphKind.LIST_ITEM, "• کتاب"),
+        (ParagraphKind.LIST_ITEM, "• ها"),
+        (ParagraphKind.LIST_ITEM, "• ی"),
+        (ParagraphKind.LIST_ITEM, "• م"),
+        (
+            ParagraphKind.PROSE,
+            "این ویژگی باعث می شود فرایند توکن بندی (Tokenization) در زبان فارسی پیچیده تر "
+            "باشد و به ابزارهای تخصصی نیاز داشته باشد. از جمله ابزارهای رایج برای این کار "
+            "میتوان به موارد زیر اشاره کرد:",
+        ),
+        (ParagraphKind.LIST_ITEM, "• Hazm"),
+        (ParagraphKind.LIST_ITEM, "• NLTK Persian"),
+        (
+            ParagraphKind.PROSE,
+            "استفاده از این ابزارها به تفکیک صحیح اجزای کلمات و بهبود کیفیت بازیابی اطلاعات "
+            "در سیستمهای RAG کمک میکند.",
+        ),
+    ]
 
 
 def test_ruled_table_rows_preserve_original_and_add_header_context() -> None:

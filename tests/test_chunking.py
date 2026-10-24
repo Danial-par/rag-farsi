@@ -303,7 +303,7 @@ def test_sample_pdf_keeps_reranking_list_and_consecutive_headings_together() -> 
     ]
 
     assert any({(4, number) for number in range(3, 8)} <= refs for refs in positions)
-    assert any({(9, 5), (9, 6), (9, 7)} <= refs for refs in positions)
+    assert any({(9, 7), (9, 8), (9, 9)} <= refs for refs in positions)
     assert {ref.source_paragraph_id for chunk in chunks for ref in chunk.references} == {
         paragraph.source_paragraph_id for paragraph in paragraphs
     }

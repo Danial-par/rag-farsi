@@ -100,18 +100,16 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .citation-location { color: var(--muted); font-size: 10px; }
 .citation-preview { color: #5e6b64; font-size: 11px; line-height: 1.8; unicode-bidi: plaintext; }
 .citation-body { padding: 13px; border-top: 1px solid var(--line); background: #fff; font-size: 12px; line-height: 1.95; }
-.citation-section-title { color: var(--green-dark); font-weight: 700; }
-.citation-context-note, .citation-context-status { margin: 4px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.8; }
+.citation-context-status { margin: 4px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.8; }
 .citation-context-status:empty { display: none; }
 .citation-section { max-height: 30rem; overflow-y: auto; overscroll-behavior: contain; padding: 4px; border: 1px solid #e5ebe5; border-radius: 9px; background: #fcfdfb; scrollbar-gutter: stable; }
-.citation-paragraph { padding: 10px 12px; border-inline-start: 3px solid transparent; color: #637168; }
+.citation-paragraph { padding: 10px 12px; color: #637168; }
 .citation-paragraph + .citation-paragraph { margin-top: 3px; }
-.citation-paragraph.is-cited { border-inline-start-color: var(--green); border-radius: 6px; background: #e8f3eb; color: #183e2e; }
-.citation-source-highlight, .citation-context-text { display: block; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
-.citation-source-highlight { background: transparent; color: inherit; }
+.citation-paragraph.is-cited { color: var(--amber); }
+.citation-context-text { display: block; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
 .citation-paragraph h4 { color: #31574c; font-size: 12px; }
 .citation-meta { color: var(--muted); font-size: 10px; margin-bottom: 4px; }
-.citation-paragraph.is-cited .citation-meta { color: var(--green-dark); font-weight: 700; }
+.citation-paragraph.is-cited h4 { color: inherit; }
 .citation-marker { border: 0; border-radius: 5px; padding: 0 3px; background: #e8f2ed; color: #155d4c; font-size: .9em; font-weight: 700; vertical-align: baseline; }
 .citation-marker:hover { background: #d7eade; }
 .citation-highlight { border-color: #75a78f; box-shadow: 0 0 0 3px rgb(54 127 92 / 15%); }
