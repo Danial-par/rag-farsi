@@ -113,13 +113,18 @@ class ConversationDetail(ConversationSummary):
 
 
 class CitationResponse(BaseModel):
-    source_paragraph_id: UUID
+    source_paragraph_id: UUID | None = None
+    chunk_id: UUID | None = None
     document_id: UUID
     document_version_id: UUID
     document_title: str
-    page_number: int = Field(ge=1)
-    paragraph_number: int = Field(ge=1)
-    original_text: str
+    page_number: int | None = Field(default=None, ge=1)
+    paragraph_number: int | None = Field(default=None, ge=1)
+    original_text: str | None = None
+    chunk_ordinal: int | None = Field(default=None, ge=1)
+    chunk_text: str | None = None
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
     start_offset: int | None = None
     end_offset: int | None = None
 

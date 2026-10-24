@@ -74,9 +74,9 @@ class OpenRouterAnswerGenerator:
                 content=_abstention_message(question), outcome=AnswerOutcome.ABSTAINED
             )
 
-        alias_sources = _citation_aliases(evidence)
+        alias_chunks = _citation_aliases(evidence)
         schema_model = self._model.with_structured_output(StructuredAnswer, include_raw=True)
-        messages = _generation_messages(question, history, evidence, alias_sources)
+        messages = _generation_messages(question, history, evidence, alias_chunks)
         response: Any = None
         for attempt in range(2):
             if attempt:
@@ -103,7 +103,7 @@ class OpenRouterAnswerGenerator:
                 continue
             try:
                 return _candidate_from_structured(
-                    question, parsed, alias_sources, response.get("raw")
+                    question, parsed, alias_chunks, response.get("raw")
                 )
             except ValueError:
                 if attempt == 1:
@@ -151,23 +151,16 @@ def _generation_messages(
     evidence: RetrievalResult,
     aliases: dict[str, Any],
 ) -> list[SystemMessage | HumanMessage]:
+    aliases_by_chunk_id = {chunk.chunk_id: alias for alias, chunk in aliases.items()}
     evidence_chunks = []
     for chunk in evidence.evidence:
         evidence_chunks.append(
             {
+                "alias": aliases_by_chunk_id[chunk.chunk_id],
+                "document_title": chunk.document_title,
+                "page_start": min(source.page_number for source in chunk.citation_sources),
+                "page_end": max(source.page_number for source in chunk.citation_sources),
                 "chunk_text": chunk.normalized_text,
-                "citations": [
-                    {
-                        "alias": alias,
-                        "document_title": source.document_title,
-                        "physical_page": source.page_number,
-                        "paragraph_number": source.paragraph_number,
-                        "source_text": source.original_text,
-                    }
-                    for alias, source in aliases.items()
-                    if source.source_paragraph_id
-                    in {item.source_paragraph_id for item in chunk.citation_sources}
-                ],
             }
         )
     payload = {
@@ -209,8 +202,7 @@ def _abstention_message(question: str) -> str:
 def _citation_aliases(evidence: RetrievalResult) -> dict[str, Any]:
     sources: dict[UUID, Any] = {}
     for chunk in evidence.evidence:
-        for source in chunk.citation_sources:
-            sources.setdefault(source.source_paragraph_id, source)
+        sources.setdefault(chunk.chunk_id, chunk)
     return {f"E{index}": source for index, source in enumerate(sources.values(), start=1)}
 
 
@@ -231,10 +223,10 @@ def _candidate_from_structured(
         for alias in claim.citations:
             if not _ALIAS_PATTERN.fullmatch(alias) or alias not in aliases:
                 raise ValueError("The answer selected an unknown citation alias")
-            source_id = aliases[alias].source_paragraph_id
-            if source_id in selected_ids:
+            chunk_id = aliases[alias].chunk_id
+            if chunk_id in selected_ids:
                 raise ValueError("Citation aliases cannot be duplicated across claims")
-            selected_ids.append(source_id)
+            selected_ids.append(chunk_id)
         citation_markers = ", ".join(
             f"{index}"
             for index, alias in enumerate(
@@ -278,7 +270,7 @@ def _candidate_from_structured(
     return AnswerCandidate(
         content=content,
         outcome=outcome,
-        cited_paragraph_ids=tuple(selected_ids),
+        cited_chunk_ids=tuple(selected_ids),
         unsupported_content=unsupported,
         model_usage=_safe_usage(raw),
         provider_metadata=_safe_provider_metadata(raw),
@@ -288,14 +280,10 @@ def _candidate_from_structured(
 def _validate_candidate(candidate: AnswerCandidate, evidence: RetrievalResult) -> None:
     if not candidate.content.strip():
         raise ValueError("Validated answer content cannot be blank")
-    citation_ids = candidate.cited_paragraph_ids
+    citation_ids = candidate.cited_chunk_ids
     if len(set(citation_ids)) != len(citation_ids):
         raise ValueError("Answer citation identifiers must be unique")
-    available_ids = {
-        source.source_paragraph_id
-        for chunk in evidence.evidence
-        for source in chunk.citation_sources
-    }
+    available_ids = {chunk.chunk_id for chunk in evidence.evidence}
     if not set(citation_ids).issubset(available_ids):
         raise ValueError("Answer citations must come from retrieved evidence")
     if candidate.outcome is AnswerOutcome.ABSTAINED:

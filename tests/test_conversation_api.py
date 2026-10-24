@@ -320,6 +320,11 @@ async def test_chat_serializes_partial_answer_and_whole_paragraph_citation(
     assert body["answer_outcome"] == "partially_answered"
     assert body["citations"][0] == {
         **citation,
+        "chunk_id": None,
+        "chunk_ordinal": None,
+        "chunk_text": None,
+        "page_start": None,
+        "page_end": None,
         "start_offset": None,
         "end_offset": None,
     }

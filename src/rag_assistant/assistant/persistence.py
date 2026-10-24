@@ -82,7 +82,7 @@ class SqlAlchemyWorkflowPersistence:
                 message_id=assistant_message_id,
                 content=answer.content,
                 outcome=answer.outcome,
-                cited_paragraph_ids=answer.cited_paragraph_ids,
+                cited_chunk_ids=answer.cited_chunk_ids,
                 model_usage=answer.model_usage,
                 provider_metadata=answer.provider_metadata,
             )

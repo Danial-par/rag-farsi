@@ -33,7 +33,7 @@ def _evidence(paragraph_id: UUID | None = None) -> RetrievalResult:
         embedding_dimensions=1024,
         evidence=(
             EvidenceChunk(
-                chunk_id=uuid4(),
+                chunk_id=source_id,
                 document_id=uuid4(),
                 document_version_id=uuid4(),
                 document_title="راهنما",
@@ -112,8 +112,7 @@ class FakePersistence:
             outcome=answer.outcome,
             content=answer.content,
             citation_snapshot=tuple(
-                {"source_paragraph_id": str(paragraph_id)}
-                for paragraph_id in answer.cited_paragraph_ids
+                {"chunk_id": str(paragraph_id)} for paragraph_id in answer.cited_chunk_ids
             ),
         )
 
@@ -221,7 +220,7 @@ async def test_graph_generates_validated_evidence_grounded_answer() -> None:
         AnswerCandidate(
             content="پاسخ مستند",
             outcome=AnswerOutcome.FULLY_ANSWERED,
-            cited_paragraph_ids=(source_id,),
+            cited_chunk_ids=(source_id,),
         )
     )
     validator = FakeValidator()
@@ -279,7 +278,7 @@ async def test_graph_abstains_and_persists_no_citations_when_retrieval_is_empty(
     assert output.status is MessageStatus.COMPLETED
     assert output.outcome is AnswerOutcome.ABSTAINED
     assert output.citation_snapshot == ()
-    assert persistence.completed_answers[0].cited_paragraph_ids == ()
+    assert persistence.completed_answers[0].cited_chunk_ids == ()
     assert generator.calls == []
     assert validator.calls == []
 
@@ -327,9 +326,9 @@ async def test_graph_rejects_citations_that_were_not_supplied_by_retrieval() -> 
     generated = AnswerCandidate(
         content="پاسخ",
         outcome=AnswerOutcome.FULLY_ANSWERED,
-        cited_paragraph_ids=(source_id,),
+        cited_chunk_ids=(source_id,),
     )
-    invalid = generated.model_copy(update={"cited_paragraph_ids": (uuid4(),)})
+    invalid = generated.model_copy(update={"cited_chunk_ids": (uuid4(),)})
 
     output = await _workflow(
         persistence=persistence,
@@ -354,7 +353,7 @@ async def test_graph_state_does_not_leak_between_invocations() -> None:
         AnswerCandidate(
             content="پاسخ اول",
             outcome=AnswerOutcome.FULLY_ANSWERED,
-            cited_paragraph_ids=(first_source,),
+            cited_chunk_ids=(first_source,),
         )
     )
     workflow = _workflow(
@@ -371,7 +370,7 @@ async def test_graph_state_does_not_leak_between_invocations() -> None:
     generator.answer = AnswerCandidate(
         content="پاسخ دوم\n\nبخش پشتیبانی‌نشده: مقدار ذکرنشده",
         outcome=AnswerOutcome.PARTIALLY_ANSWERED,
-        cited_paragraph_ids=(second_source,),
+        cited_chunk_ids=(second_source,),
         unsupported_content="مقدار ذکرنشده",
     )
     second = await workflow.ainvoke(

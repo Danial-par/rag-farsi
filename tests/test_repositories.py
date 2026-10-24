@@ -18,9 +18,11 @@ from rag_assistant.db.models import (
 )
 from rag_assistant.db.repositories import (
     AuthSessionRepository,
+    ChunkParagraphReference,
     ConversationRepository,
     DocumentRepository,
     InvalidPersistenceStateError,
+    NewChunk,
     NewDocumentVersion,
     NewSourceParagraph,
     RecordNotFoundError,
@@ -265,6 +267,16 @@ async def test_completed_messages_store_validated_immutable_citation_snapshots(
             )
         ],
     )
+    chunk = await documents.add_chunk(
+        version_id=version.id,
+        values=NewChunk(
+            ordinal=1,
+            normalized_text="این متن اصلی و بدون نرمال‌سازی است.",
+            token_count=8,
+            embedding=[0.001] * 1024,
+            paragraphs=[ChunkParagraphReference(source_paragraph_id=paragraph.id)],
+        ),
+    )
     await documents.mark_succeeded(version.id, extraction_metadata={})
     await documents.activate_owned_version(
         owner_id=user.id, document_id=document.id, version_id=version.id
@@ -285,20 +297,21 @@ async def test_completed_messages_store_validated_immutable_citation_snapshots(
         message_id=pending.id,
         content="بخش پشتیبانی‌شده پاسخ.",
         outcome=AnswerOutcome.PARTIALLY_ANSWERED,
-        cited_paragraph_ids=[paragraph.id],
+        cited_chunk_ids=[chunk.id],
         model_usage={"input_tokens": 10, "output_tokens": 4},
     )
 
     assert completed.status.value == "completed"
     assert completed.citation_snapshot == [
         {
-            "source_paragraph_id": str(paragraph.id),
+            "chunk_id": str(chunk.id),
             "document_id": str(document.id),
             "document_version_id": str(version.id),
             "document_title": "منبع فارسی",
-            "page_number": 4,
-            "paragraph_number": 2,
-            "original_text": "این متن اصلی و بدون نرمال‌سازی است.",
+            "chunk_ordinal": 1,
+            "chunk_text": "این متن اصلی و بدون نرمال‌سازی است.",
+            "page_start": 4,
+            "page_end": 4,
         }
     ]
 

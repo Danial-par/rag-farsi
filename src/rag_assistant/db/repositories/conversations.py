@@ -12,6 +12,8 @@ from sqlalchemy.orm import selectinload
 from rag_assistant.db.base import utc_now
 from rag_assistant.db.models import (
     AnswerOutcome,
+    Chunk,
+    ChunkSourceParagraph,
     Conversation,
     ConversationDocument,
     Document,
@@ -388,25 +390,35 @@ class ConversationRepository:
         message_id: UUID,
         content: str,
         outcome: AnswerOutcome,
-        cited_paragraph_ids: Sequence[UUID],
+        cited_chunk_ids: Sequence[UUID] = (),
+        cited_paragraph_ids: Sequence[UUID] = (),
         model_usage: dict[str, Any] | None = None,
         provider_metadata: dict[str, Any] | None = None,
     ) -> Message:
         if not content.strip():
             raise InvalidPersistenceStateError("Completed assistant content cannot be blank")
         message = await self._locked_pending_assistant_message(owner_id, message_id)
-        unique_citation_ids = list(dict.fromkeys(cited_paragraph_ids))
-        if len(unique_citation_ids) != len(cited_paragraph_ids):
+        if cited_chunk_ids and cited_paragraph_ids:
+            raise InvalidPersistenceStateError("Citation types cannot be mixed")
+        citation_ids = cited_chunk_ids or cited_paragraph_ids
+        unique_citation_ids = list(dict.fromkeys(citation_ids))
+        if len(unique_citation_ids) != len(citation_ids):
             raise InvalidPersistenceStateError("Citation identifiers must be unique")
         if outcome is AnswerOutcome.ABSTAINED and unique_citation_ids:
             raise InvalidPersistenceStateError("Abstained messages cannot contain citations")
         if outcome is not AnswerOutcome.ABSTAINED and not unique_citation_ids:
             raise InvalidPersistenceStateError("Supported answers require at least one citation")
 
-        citation_snapshot = await self._build_citation_snapshot(
-            conversation_id=message.conversation_id,
-            paragraph_ids=unique_citation_ids,
-        )
+        if cited_chunk_ids:
+            citation_snapshot = await self._build_citation_snapshot(
+                conversation_id=message.conversation_id,
+                chunk_ids=unique_citation_ids,
+            )
+        else:
+            citation_snapshot = await self._build_paragraph_citation_snapshot(
+                conversation_id=message.conversation_id,
+                paragraph_ids=unique_citation_ids,
+            )
         message.status = MessageStatus.COMPLETED
         message.answer_outcome = outcome
         message.content = content
@@ -469,30 +481,72 @@ class ConversationRepository:
         return message
 
     async def _build_citation_snapshot(
-        self, *, conversation_id: UUID, paragraph_ids: Sequence[UUID]
+        self, *, conversation_id: UUID, chunk_ids: Sequence[UUID]
     ) -> list[dict[str, Any]]:
-        if not paragraph_ids:
+        if not chunk_ids:
             return []
         rows = await self._session.execute(
-            select(SourceParagraph, DocumentVersion, Document)
+            select(Chunk, DocumentVersion, Document, SourceParagraph.page_number)
             .join(
                 DocumentVersion,
-                DocumentVersion.id == SourceParagraph.document_version_id,
+                DocumentVersion.id == Chunk.document_version_id,
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(
                 ConversationDocument,
                 ConversationDocument.document_id == Document.id,
             )
+            .join(ChunkSourceParagraph, ChunkSourceParagraph.chunk_id == Chunk.id)
+            .join(SourceParagraph, SourceParagraph.id == ChunkSourceParagraph.source_paragraph_id)
+            .where(
+                ConversationDocument.conversation_id == conversation_id,
+                Chunk.id.in_(chunk_ids),
+                Document.active_version_id == DocumentVersion.id,
+                Document.deleted_at.is_(None),
+            )
+        )
+        rows_by_id: dict[UUID, dict[str, Any]] = {}
+        for chunk, version, document, page_number in rows:
+            snapshot = rows_by_id.setdefault(
+                chunk.id,
+                {
+                    "chunk_id": str(chunk.id),
+                    "document_id": str(document.id),
+                    "document_version_id": str(version.id),
+                    "document_title": document.title,
+                    "chunk_ordinal": chunk.ordinal,
+                    "chunk_text": chunk.normalized_text,
+                    "page_start": page_number,
+                    "page_end": page_number,
+                },
+            )
+            snapshot["page_start"] = min(snapshot["page_start"], page_number)
+            snapshot["page_end"] = max(snapshot["page_end"], page_number)
+        if set(chunk_ids) != rows_by_id.keys():
+            raise InvalidPersistenceStateError(
+                "Every citation must resolve to a retrieved chunk in the conversation scope"
+            )
+        return [rows_by_id[chunk_id] for chunk_id in chunk_ids]
+
+    async def _build_paragraph_citation_snapshot(
+        self, *, conversation_id: UUID, paragraph_ids: Sequence[UUID]
+    ) -> list[dict[str, Any]]:
+        if not paragraph_ids:
+            return []
+        rows = await self._session.execute(
+            select(SourceParagraph, DocumentVersion, Document)
+            .join(DocumentVersion, DocumentVersion.id == SourceParagraph.document_version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(ConversationDocument, ConversationDocument.document_id == Document.id)
             .where(
                 ConversationDocument.conversation_id == conversation_id,
                 SourceParagraph.id.in_(paragraph_ids),
                 Document.deleted_at.is_(None),
             )
         )
-        rows_by_id: dict[UUID, tuple[SourceParagraph, DocumentVersion, Document]] = {}
-        for paragraph, version, document in rows:
-            rows_by_id[paragraph.id] = (paragraph, version, document)
+        rows_by_id = {
+            paragraph.id: (paragraph, version, document) for paragraph, version, document in rows
+        }
         if set(paragraph_ids) != rows_by_id.keys():
             raise InvalidPersistenceStateError(
                 "Every citation must resolve to a source paragraph in the conversation scope"

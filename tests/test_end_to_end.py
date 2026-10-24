@@ -78,11 +78,11 @@ class GroundedGenerator:
                 content="شواهد کافی برای پاسخ یافت نشد.",
                 outcome=AnswerOutcome.ABSTAINED,
             )
-        paragraph_id = evidence.evidence[0].citation_sources[0].source_paragraph_id
+        chunk_id = evidence.evidence[0].chunk_id
         return AnswerCandidate(
             content="RAG اطلاعات مرتبط را بازیابی می‌کند و پاسخ را بر پایه آن می‌سازد. [1]",
             outcome=AnswerOutcome.FULLY_ANSWERED,
-            cited_paragraph_ids=(paragraph_id,),
+            cited_chunk_ids=(chunk_id,),
         )
 
 
@@ -158,9 +158,10 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
     assert answer["answer_outcome"] == "fully_answered"
     assert len(answer["citations"]) == 1
     citation = answer["citations"][0]
-    assert citation["original_text"]
-    assert citation["page_number"] >= 1
-    assert citation["paragraph_number"] >= 1
+    assert citation["chunk_id"]
+    assert citation["chunk_text"]
+    assert citation["page_start"] >= 1
+    assert citation["page_end"] >= citation["page_start"]
 
     abstained = await database_client.post(
         f"/api/v1/conversations/{conversation_id}/messages",

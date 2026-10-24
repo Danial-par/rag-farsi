@@ -238,17 +238,11 @@ class EvidenceEchoGenerator:
         del question, history
         self.calls += 1
         assert isinstance(evidence, RetrievalResult)
-        citation_ids = tuple(
-            dict.fromkeys(
-                source.source_paragraph_id
-                for chunk in evidence.evidence
-                for source in chunk.citation_sources
-            )
-        )[:1]
+        citation_ids = tuple(dict.fromkeys(chunk.chunk_id for chunk in evidence.evidence))[:1]
         return AnswerCandidate(
             content="Supported by retrieved evidence.",
             outcome=AnswerOutcome.FULLY_ANSWERED,
-            cited_paragraph_ids=citation_ids,
+            cited_chunk_ids=citation_ids,
         )
 
 

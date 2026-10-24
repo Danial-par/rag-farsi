@@ -253,20 +253,34 @@
     summary.append(text("span", index + 1, "citation-number"));
     const description = document.createElement("span"); description.className = "citation-description";
     description.append(text("span", citation.document_title, "citation-title"));
-    description.append(text("span", `صفحه ${citation.page_number} · بند ${citation.paragraph_number}`, "citation-location"));
-    const preview = String(citation.original_text || "").replace(/\s+/g, " ").trim();
+    const location = citation.chunk_id
+      ? citation.page_start === citation.page_end
+        ? `صفحه ${citation.page_start}`
+        : `صفحه ${citation.page_start}–${citation.page_end}`
+      : `صفحه ${citation.page_number} · بند ${citation.paragraph_number}`;
+    description.append(text("span", location, "citation-location"));
+    const citationText = citation.chunk_text || citation.original_text || "";
+    const preview = String(citationText).replace(/\s+/g, " ").trim();
     description.append(text("span", preview.length > 120 ? `${preview.slice(0, 120)}…` : preview, "citation-preview"));
     summary.append(description);
     const body = document.createElement("div"); body.className = "citation-body";
     const section = document.createElement("div"); section.className = "citation-section";
-    section.append(citationParagraph(citation, true));
+    if (citation.chunk_id) {
+      const block = document.createElement("div");
+      block.className = "citation-paragraph is-cited";
+      block.append(text("div", location, "citation-meta"));
+      block.append(text("p", citation.chunk_text, "citation-context-text"));
+      section.append(block);
+    } else {
+      section.append(citationParagraph(citation, true));
+    }
     const status = text("div", "", "citation-context-status"); status.setAttribute("role", "status");
     const copy = text("button", "کپی متن مورد استناد", "copy-button citation-copy"); copy.type = "button";
-    copy.addEventListener("click", () => copyText(citation.original_text, copy));
+    copy.addEventListener("click", () => copyText(citationText, copy));
     body.append(section, status, copy); details.append(summary, body);
     let loaded = false; let loading = false;
     details.addEventListener("toggle", async () => {
-      if (!details.open || loaded || loading || !messageId || !conversationId) return;
+      if (citation.chunk_id || !details.open || loaded || loading || !messageId || !conversationId) return;
       loading = true; section.setAttribute("aria-busy", "true"); status.textContent = "در حال دریافت متن پیرامون…";
       try {
         const context = await api(`/conversations/${conversationId}/messages/${messageId}/citations/${citation.source_paragraph_id}/context`);

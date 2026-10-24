@@ -180,7 +180,7 @@ async def run_live_evaluation(
                 )
             latency_ms = (perf_counter() - started) * 1000
             retrieved = _retrieved_units(retrieval)
-            persisted = _snapshot_units(output.citation_snapshot, paragraph_by_id)
+            persisted = _snapshot_units(output.citation_snapshot, paragraph_by_id, retrieval)
             cited = persisted
             usage = await _persisted_usage(
                 session_factory, assistant_message_id=output.assistant_message_id
@@ -452,16 +452,36 @@ def _retrieved_unit_groups(result: RetrievalResult) -> tuple[tuple[str, ...], ..
 
 
 def _snapshot_units(
-    snapshot: tuple[dict[str, Any], ...], paragraph_by_id: dict[UUID, str]
+    snapshot: tuple[dict[str, Any], ...],
+    paragraph_by_id: dict[UUID, str],
+    retrieval: RetrievalResult | None = None,
 ) -> tuple[str, ...]:
     units: list[str] = []
     for item in snapshot:
-        source_id = UUID(str(item["source_paragraph_id"]))
-        identity = paragraph_by_id.get(source_id)
-        if identity is None or identity != _identity(item):
-            raise ValueError("Persisted citation snapshot does not match its source paragraph")
-        units.append(identity)
-    return tuple(units)
+        if "chunk_id" in item:
+            if retrieval is None:
+                raise ValueError("Retrieved chunks are required to resolve chunk citations")
+            chunk_id = UUID(str(item["chunk_id"]))
+            chunk = next(
+                (candidate for candidate in retrieval.evidence if candidate.chunk_id == chunk_id),
+                None,
+            )
+            if chunk is None:
+                raise ValueError("Persisted citation snapshot does not match a retrieved chunk")
+            for source in chunk.citation_sources:
+                identity = paragraph_by_id.get(source.source_paragraph_id)
+                if identity is None:
+                    raise ValueError(
+                        "Retrieved chunk contains a source outside the evaluation sample"
+                    )
+                units.append(identity)
+        else:
+            source_id = UUID(str(item["source_paragraph_id"]))
+            identity = paragraph_by_id.get(source_id)
+            if identity is None or identity != _identity(item):
+                raise ValueError("Persisted citation snapshot does not match its source paragraph")
+            units.append(identity)
+    return tuple(dict.fromkeys(units))
 
 
 def _identity(citation: dict[str, Any]) -> str:
