@@ -63,13 +63,26 @@ NodeResult = dict[str, object]
 NodeAction = Callable[[], Awaitable[NodeResult]]
 
 _NODE_DESCRIPTIONS = {
-    "load_conversation": "Authorize the conversation and load recent completed messages for context.",
-    "create_execution": "Create or reuse the idempotent user and pending assistant message records.",
-    "prepare_question": "Prepare the current question for retrieval; conversation history is not used here.",
-    "retrieve_evidence": "Search only documents authorized for this conversation and return ranked evidence.",
-    "assess_evidence": "Decide whether retrieval returned any evidence that can be passed to generation.",
+    "load_conversation": (
+        "Authorize the conversation and load recent completed messages for context."
+    ),
+    "create_execution": (
+        "Create or reuse the idempotent user and pending assistant message records."
+    ),
+    "prepare_question": (
+        "Prepare the current question for retrieval; conversation history is not used here."
+    ),
+    "retrieve_evidence": (
+        "Search only documents authorized for this conversation and return ranked evidence."
+    ),
+    "assess_evidence": (
+        "Decide whether retrieval returned any evidence that can be passed to generation."
+    ),
     "abstain": "Create a citation-free abstention because retrieval returned no evidence.",
-    "generate_answer": "Generate a structured answer using the question, conversation context, and retrieved evidence.",
+    "generate_answer": (
+        "Generate a structured answer using the question, conversation context, "
+        "and retrieved evidence."
+    ),
     "validate_answer": "Check the answer outcome and ensure every cited chunk came from retrieval.",
     "persist_completed": "Persist the validated answer and its immutable citation snapshot.",
     "persist_failed": "Persist a terminal failure for the pending assistant message.",
