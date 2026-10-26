@@ -77,6 +77,8 @@ EMBEDDING_DIMENSIONS=1024
 
 The `.env` file contains secrets and is ignored by Git. Do not commit or share it. Langfuse settings are optional and may remain empty.
 
+When an OpenRouter key is configured, ingestion uses the chat model to identify heading levels and save parent/child section paths in chunk metadata. If annotation is disabled or unavailable, deterministic PDF heading labels remain as a fallback. Retrieval first searches a larger dense candidate set, then uses the chat model to rerank chunks and expand up to two relevant sections (for broad questions or missing surrounding context). These limits can be adjusted with `RETRIEVAL_CANDIDATE_COUNT`, `RETRIEVAL_MAX_EXPANDED_SECTIONS`, and `RETRIEVAL_SECTION_MAX_CHARACTERS`.
+
 ### 4. Start PostgreSQL and prepare the database
 
 ```powershell
@@ -130,6 +132,12 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000) in a browser.
 5. Expand the returned citations to inspect their document, page, paragraph, and original text.
 
 You can also upload another born-digital PDF from the document panel. Keep the worker terminal running while its status changes from pending/processing to ready.
+
+To run the broad-section retrieval evaluation against the seeded sample, use:
+
+```powershell
+uv run rag-eval-live --case-id fa-rag-components-overview
+```
 
 ## Stop the application
 

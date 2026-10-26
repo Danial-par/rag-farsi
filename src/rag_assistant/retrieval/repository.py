@@ -37,6 +37,7 @@ class CitationRecord:
     paragraph_number: int
     kind: ParagraphKind
     original_text: str
+    normalized_text: str
     start_offset: int | None
     end_offset: int | None
 
@@ -52,6 +53,19 @@ class EvidenceRecord:
     token_count: int
     cosine_similarity: float
     citations: tuple[CitationRecord, ...]
+    section_path: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExpandedSectionRecord:
+    section_id: UUID
+    document_id: UUID
+    document_version_id: UUID
+    document_title: str
+    heading_path: tuple[str, ...]
+    normalized_text: str
+    citations: tuple[CitationRecord, ...]
+    truncated: bool
 
 
 @dataclass(slots=True)
@@ -65,6 +79,10 @@ class RetrievalRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def release_read_transaction(self) -> None:
+        """Release database resources before awaiting a slow external reranker."""
+        await self._session.rollback()
 
     async def inspect_scope(
         self,
@@ -135,6 +153,7 @@ class RetrievalRepository:
                 Chunk.ordinal.label("chunk_ordinal"),
                 Chunk.normalized_text,
                 Chunk.token_count,
+                Chunk.chunk_metadata,
                 distance.label("cosine_distance"),
             )
             .select_from(authorized)
@@ -177,6 +196,7 @@ class RetrievalRepository:
                 SourceParagraph.paragraph_number,
                 SourceParagraph.kind,
                 SourceParagraph.original_text,
+                SourceParagraph.normalized_text,
             )
             .select_from(ranked)
             .outerjoin(
@@ -214,6 +234,151 @@ class RetrievalRepository:
             {"value": previous_indexscan},
         )
         return self._records(rows)
+
+    async def expand_sections(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        selections: Sequence[tuple[UUID, UUID, tuple[str, ...]]],
+        max_characters: int,
+    ) -> list[ExpandedSectionRecord]:
+        """Load source paragraphs for model-selected sections inside authorized scope."""
+        if not selections:
+            return []
+        authorized = self._authorized_active_documents(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        section_filters = [
+            and_(
+                authorized.c.document_version_id == version_id,
+                Chunk.document_version_id == version_id,
+                Chunk.chunk_metadata.contains({"section_path": [{"id": str(section_id)}]}),
+            )
+            for version_id, section_id, _ in selections
+        ]
+        statement = (
+            select(
+                authorized.c.document_id,
+                authorized.c.document_version_id,
+                authorized.c.document_title,
+                Chunk.chunk_metadata,
+                SourceParagraph.id.label("source_paragraph_id"),
+                SourceParagraph.page_number,
+                SourceParagraph.paragraph_number,
+                SourceParagraph.kind,
+                SourceParagraph.original_text,
+                SourceParagraph.normalized_text,
+            )
+            .select_from(authorized)
+            .join(
+                Chunk,
+                and_(
+                    Chunk.document_version_id == authorized.c.document_version_id,
+                    Chunk.embedding_model == authorized.c.embedding_model,
+                    Chunk.embedding_dimensions == authorized.c.embedding_dimensions,
+                ),
+            )
+            .join(
+                ChunkSourceParagraph,
+                and_(
+                    ChunkSourceParagraph.chunk_id == Chunk.id,
+                    ChunkSourceParagraph.document_version_id == Chunk.document_version_id,
+                ),
+            )
+            .join(
+                SourceParagraph,
+                and_(
+                    SourceParagraph.id == ChunkSourceParagraph.source_paragraph_id,
+                    SourceParagraph.document_version_id == Chunk.document_version_id,
+                ),
+            )
+            .where(or_(*section_filters))
+            .order_by(
+                authorized.c.document_version_id,
+                SourceParagraph.page_number,
+                SourceParagraph.paragraph_number,
+            )
+        )
+        rows = (await self._session.execute(statement)).mappings().all()
+        sections: dict[tuple[UUID, UUID], dict[str, object]] = {}
+        for row in rows:
+            row_path = (row["chunk_metadata"] or {}).get("section_path", [])
+            for version_id, section_id, heading_path in selections:
+                if row["document_version_id"] != version_id or not any(
+                    item.get("id") == str(section_id) for item in row_path if isinstance(item, dict)
+                ):
+                    continue
+                key = (version_id, section_id)
+                section = sections.setdefault(
+                    key,
+                    {
+                        "document_id": row["document_id"],
+                        "document_version_id": version_id,
+                        "document_title": row["document_title"],
+                        "heading_path": heading_path,
+                        "citations": {},
+                    },
+                )
+                citation_map = section["citations"]
+                assert isinstance(citation_map, dict)
+                source_id = row["source_paragraph_id"]
+                citation_map.setdefault(
+                    source_id,
+                    CitationRecord(
+                        source_paragraph_id=source_id,
+                        page_number=int(row["page_number"]),
+                        paragraph_number=int(row["paragraph_number"]),
+                        kind=row["kind"],
+                        original_text=row["original_text"],
+                        normalized_text=row["normalized_text"],
+                        start_offset=None,
+                        end_offset=None,
+                    ),
+                )
+
+        expanded: list[ExpandedSectionRecord] = []
+        for version_id, section_id, _ in selections:
+            section = sections.get((version_id, section_id))
+            if section is None:
+                continue
+            citation_map = section["citations"]
+            assert isinstance(citation_map, dict)
+            citations = sorted(
+                citation_map.values(),
+                key=lambda item: (item.page_number, item.paragraph_number),
+            )
+            text_parts: list[str] = []
+            included: list[CitationRecord] = []
+            remaining = max_characters
+            truncated = False
+            for citation in citations:
+                if remaining <= 0:
+                    truncated = True
+                    break
+                value = citation.normalized_text
+                if len(value) > remaining:
+                    text_parts.append(value[:remaining])
+                    included.append(citation)
+                    truncated = True
+                    break
+                text_parts.append(value)
+                included.append(citation)
+                remaining -= len(value) + 2
+            expanded.append(
+                ExpandedSectionRecord(
+                    section_id=section_id,
+                    document_id=section["document_id"],
+                    document_version_id=version_id,
+                    document_title=section["document_title"],
+                    heading_path=section["heading_path"],
+                    normalized_text="\n\n".join(text_parts),
+                    citations=tuple(included),
+                    truncated=truncated,
+                )
+            )
+        return expanded
 
     @staticmethod
     def _authorized_active_documents(
@@ -299,6 +464,7 @@ class RetrievalRepository:
                         paragraph_number=int(row["paragraph_number"]),
                         kind=row["kind"],
                         original_text=row["original_text"],
+                        normalized_text=row["normalized_text"],
                         start_offset=row["start_offset"],
                         end_offset=row["end_offset"],
                     ),
@@ -324,6 +490,14 @@ class RetrievalRepository:
                     token_count=int(row["token_count"]),
                     cosine_similarity=1.0 - float(row["cosine_distance"]),
                     citations=tuple(citation for _, citation in ordered_citations),
+                    section_path=tuple(
+                        item
+                        for item in (row["chunk_metadata"] or {}).get("section_path", [])
+                        if isinstance(item, dict)
+                        and isinstance(item.get("id"), str)
+                        and isinstance(item.get("title"), str)
+                        and isinstance(item.get("level"), int)
+                    ),
                 )
             )
         return records

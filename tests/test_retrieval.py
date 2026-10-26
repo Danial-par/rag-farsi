@@ -6,11 +6,12 @@ from typing import cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_assistant.core.config import Settings
 from rag_assistant.db.models import (
+    Chunk,
     ChunkSourceParagraph,
     ConversationDocument,
     Document,
@@ -35,6 +36,7 @@ from rag_assistant.retrieval import (
     RetrievalScopeError,
     RetrievalService,
 )
+from rag_assistant.retrieval.planner import RetrievalPlan
 
 
 def _vector(first: float, second: float = 0.0) -> list[float]:
@@ -55,6 +57,25 @@ class QueryEmbeddingClient:
     ) -> list[list[float]]:
         self.calls.append((list(texts), model, dimensions))
         return [list(self.vector) for _ in texts]
+
+
+class FixedRetrievalPlanner:
+    def __init__(
+        self,
+        *,
+        chunk_ids: tuple[UUID, ...],
+        section_selections: tuple[tuple[UUID, UUID], ...],
+    ) -> None:
+        self.plan_result = RetrievalPlan(
+            chunk_ids=chunk_ids,
+            section_selections=section_selections,
+        )
+
+    async def plan(
+        self, *, question: str, candidates: Sequence[object], top_k: int
+    ) -> RetrievalPlan:
+        del question, candidates, top_k
+        return self.plan_result
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +102,7 @@ async def _indexed_document(
     shared_default: bool = False,
     embedding_model: str = "openai/text-embedding-3-large",
     activate: bool = True,
+    chunk_metadata: Sequence[dict[str, object]] | None = None,
 ) -> IndexedDocument:
     repository = DocumentRepository(session)
     if shared_default:
@@ -133,6 +155,7 @@ async def _indexed_document(
                 token_count=5,
                 embedding=vector,
                 paragraphs=[ChunkParagraphReference(source_paragraph_id=paragraph.id)],
+                metadata=chunk_metadata[index - 1] if chunk_metadata is not None else {},
             ),
         )
     await repository.mark_succeeded(version.id, extraction_metadata={})
@@ -162,6 +185,69 @@ def _service(
     client: QueryEmbeddingClient,
 ) -> RetrievalService:
     return RetrievalService(session=session, embedding_client=client, settings=settings)
+
+
+async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
+    db_session: AsyncSession,
+    settings: Settings,
+) -> None:
+    user = await _user(db_session, "section-expansion@example.com")
+    parent_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    section_path = [{"id": str(parent_id), "title": "اجزای اصلی RAG", "level": 1}]
+    indexed = await _indexed_document(
+        db_session,
+        key="documents/sectioned.pdf",
+        title="راهنمای RAG",
+        owner_id=user.id,
+        vectors=[_vector(1.0), _vector(0.8, 0.6), _vector(0.6, 0.8)],
+        chunk_metadata=[{"section_path": section_path} for _ in range(3)],
+    )
+    conversations = ConversationRepository(db_session)
+    conversation = await conversations.create(owner_id=user.id)
+    await conversations.add_document(
+        owner_id=user.id,
+        conversation_id=conversation.id,
+        document_id=indexed.document.id,
+    )
+    chunk_ids = tuple(
+        await db_session.scalars(
+            select(Chunk.id)
+            .where(Chunk.document_version_id == indexed.version.id)
+            .order_by(Chunk.ordinal)
+        )
+    )
+    assert len(chunk_ids) == 3
+    planner = FixedRetrievalPlanner(
+        chunk_ids=(chunk_ids[0],),
+        section_selections=((indexed.version.id, parent_id),),
+    )
+    await db_session.flush()
+    async with AsyncSession(
+        bind=db_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    ) as retrieval_session:
+        service = RetrievalService(
+            session=retrieval_session,
+            embedding_client=QueryEmbeddingClient(),
+            settings=settings,
+            planner=planner,
+        )
+        result = await service.retrieve(
+            RetrievalRequest(
+                user_id=user.id,
+                conversation_id=conversation.id,
+                question="فهرست اجزای اصلی این سیستم چیست؟",
+                top_k=1,
+            )
+        )
+
+    assert len(result.evidence) == 1
+    assert len(result.context_sections) == 1
+    assert result.context_sections[0].heading_path == ("اجزای اصلی RAG",)
+    assert {
+        source.source_paragraph_id for source in result.context_sections[0].citation_sources
+    } == set(indexed.paragraph_ids)
 
 
 async def test_retrieval_normalizes_ranks_thresholds_and_resolves_citations(

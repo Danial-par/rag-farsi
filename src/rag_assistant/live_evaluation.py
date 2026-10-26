@@ -50,6 +50,7 @@ from rag_assistant.evaluation import (
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.main import _SessionScopedRetriever
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval.planner import retrieval_planner_from_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = PROJECT_ROOT / "tests" / "fixtures" / "evaluation" / "sample_doc.json"
@@ -115,7 +116,12 @@ async def run_live_evaluation(
     observed_retriever: _ObservedRetriever | None = None
     if workflow is None:
         observed_retriever = _ObservedRetriever(
-            _SessionScopedRetriever(session_factory, embedding_client, settings)
+            _SessionScopedRetriever(
+                session_factory,
+                embedding_client,
+                settings,
+                planner=retrieval_planner_from_settings(settings),
+            )
         )
         workflow = create_rag_workflow(
             RAGDependencies(
@@ -364,7 +370,12 @@ async def _retrieve_once(
     conversation_id: UUID,
     case: EvaluationCase,
 ) -> RetrievalResult:
-    return await _SessionScopedRetriever(session_factory, embedding_client, settings).retrieve(
+    return await _SessionScopedRetriever(
+        session_factory,
+        embedding_client,
+        settings,
+        planner=retrieval_planner_from_settings(settings),
+    ).retrieve(
         RetrievalRequest(user_id=user_id, conversation_id=conversation_id, question=case.question)
     )
 
@@ -435,6 +446,11 @@ async def _next_idempotency_key(
 
 def _retrieved_units(result: RetrievalResult) -> tuple[str, ...]:
     identities = dict.fromkeys(unit for group in _retrieved_unit_groups(result) for unit in group)
+    identities.update(
+        (f"{source.page_number}:{source.paragraph_number}", None)
+        for section in result.context_sections
+        for source in section.citation_sources
+    )
     return tuple(identities)
 
 

@@ -34,6 +34,10 @@ from rag_assistant.db.session import AsyncSessionFactory, create_database_resour
 from rag_assistant.indexing import create_object_store
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, RetrievalService
+from rag_assistant.retrieval.planner import (
+    RetrievalPlanner,
+    retrieval_planner_from_settings,
+)
 from rag_assistant.web.router import router as web_router
 
 
@@ -45,10 +49,12 @@ class _SessionScopedRetriever:
         session_factory: AsyncSessionFactory,
         embedding_client: EmbeddingClient,
         settings: Settings,
+        planner: RetrievalPlanner | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_client = embedding_client
         self._settings = settings
+        self._planner = planner
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         async with self._session_factory() as session:
@@ -56,6 +62,7 @@ class _SessionScopedRetriever:
                 session=session,
                 embedding_client=self._embedding_client,
                 settings=self._settings,
+                planner=self._planner,
             )
             return await service.retrieve(request)
 
@@ -80,10 +87,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     connect_timeout_seconds=resolved_settings.embedding_connect_timeout_seconds,
                     read_timeout_seconds=resolved_settings.embedding_read_timeout_seconds,
                 )
+                retrieval_planner = retrieval_planner_from_settings(resolved_settings)
                 application.state.rag_workflow = create_rag_workflow(
                     RAGDependencies(
                         retriever=_SessionScopedRetriever(
-                            session_factory, embedding_client, resolved_settings
+                            session_factory,
+                            embedding_client,
+                            resolved_settings,
+                            planner=retrieval_planner,
                         ),
                         generator=OpenRouterAnswerGenerator.from_settings(resolved_settings),
                         validator=EvidenceAnswerValidator(),
