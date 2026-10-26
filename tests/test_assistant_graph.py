@@ -51,6 +51,7 @@ def _evidence(paragraph_id: UUID | None = None) -> RetrievalResult:
                         paragraph_number=1,
                         kind=ParagraphKind.PROSE,
                         original_text="متن اصلی منبع",
+                        normalized_text="شواهد بازیابی‌شده",
                     ),
                 ),
             ),

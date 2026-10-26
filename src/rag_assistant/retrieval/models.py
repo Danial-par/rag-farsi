@@ -20,7 +20,7 @@ class RetrievalRequest(BaseModel):
 
 
 class CitationSource(BaseModel):
-    """An authoritative persisted citation unit represented by a retrieved chunk."""
+    """A persisted citation unit with original and normalized retrieval text."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -32,6 +32,7 @@ class CitationSource(BaseModel):
     paragraph_number: int = Field(ge=1)
     kind: ParagraphKind
     original_text: str
+    normalized_text: str
     start_offset: int | None = Field(default=None, ge=0)
     end_offset: int | None = Field(default=None, ge=1)
 
