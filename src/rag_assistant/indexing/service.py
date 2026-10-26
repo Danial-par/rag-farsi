@@ -12,7 +12,7 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
 from rag_assistant.core.config import Settings
-from rag_assistant.db.models import SourceParagraph
+from rag_assistant.db.models import ParagraphKind, SourceParagraph
 from rag_assistant.db.repositories import (
     ChunkParagraphReference,
     DocumentRepository,
@@ -28,6 +28,7 @@ from rag_assistant.indexing.chunking import (
     ChunkingError,
     ChunkingParagraph,
     ParagraphChunker,
+    SectionPathItem,
     TiktokenTokenCounter,
     TokenCounter,
 )
@@ -40,6 +41,11 @@ from rag_assistant.indexing.embeddings import (
     embed_in_batches,
 )
 from rag_assistant.indexing.storage import ObjectReader, ObjectStoreError
+from rag_assistant.indexing.structure import (
+    OpenRouterStructureAnnotator,
+    StructureAnnotator,
+    heuristic_heading_levels,
+)
 
 
 class SourceIntegrityError(RuntimeError):
@@ -66,6 +72,7 @@ class DocumentIndexingService:
         settings: Settings,
         extractor: PdfExtractor | None = None,
         token_counter_factory: Callable[[str], TokenCounter] = TiktokenTokenCounter,
+        structure_annotator: StructureAnnotator | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._object_store = object_store
@@ -73,6 +80,7 @@ class DocumentIndexingService:
         self._settings = settings
         self._extractor = extractor or PdfExtractor()
         self._token_counter_factory = token_counter_factory
+        self._structure_annotator = structure_annotator
         self._lease_duration = timedelta(seconds=settings.ingestion_lease_seconds)
         self._logger = structlog.stdlib.get_logger("rag_assistant.indexing")
 
@@ -116,6 +124,35 @@ class DocumentIndexingService:
                 page_count=extracted.metadata.page_count,
             )
 
+            structure_started = perf_counter()
+            annotations = heuristic_heading_levels(paragraphs)
+            if self._settings.structure_annotation_enabled and self._settings.openrouter_api_key:
+                try:
+                    annotator = (
+                        self._structure_annotator
+                        or OpenRouterStructureAnnotator.from_settings(
+                            self._settings,
+                            on_batch_completed=lambda: self._renew(claim),
+                        )
+                    )
+                    annotations.update(await annotator.annotate(paragraphs))
+                    annotation_mode = "openrouter"
+                except Exception as exc:
+                    annotation_mode = "heuristic_fallback"
+                    await log.awarning(
+                        "structure_annotation_fell_back",
+                        error_type=type(exc).__name__,
+                    )
+            else:
+                annotation_mode = "heuristic"
+            chunking_paragraphs = self._chunking_paragraphs(paragraphs, annotations)
+            await log.ainfo(
+                "indexing_stage_completed",
+                stage="structure_annotation",
+                mode=annotation_mode,
+                duration_ms=self._elapsed_ms(structure_started),
+            )
+
             chunking_started = perf_counter()
             chunker = ParagraphChunker(
                 self._token_counter_factory(claim.embedding_model),
@@ -123,7 +160,7 @@ class DocumentIndexingService:
                 max_tokens=self._settings.chunk_max_tokens,
                 paragraph_overlap=self._settings.chunk_paragraph_overlap,
             )
-            drafts = chunker.chunk([self._chunking_paragraph(row) for row in paragraphs])
+            drafts = chunker.chunk(chunking_paragraphs)
             await log.ainfo(
                 "indexing_stage_completed",
                 stage="chunking",
@@ -281,14 +318,35 @@ class DocumentIndexingService:
             raise SourceIntegrityError("Source object hash does not match its version record")
 
     @staticmethod
-    def _chunking_paragraph(paragraph: SourceParagraph) -> ChunkingParagraph:
-        return ChunkingParagraph(
-            source_paragraph_id=paragraph.id,
-            page_number=paragraph.page_number,
-            paragraph_number=paragraph.paragraph_number,
-            kind=paragraph.kind,
-            normalized_text=paragraph.normalized_text,
-        )
+    def _chunking_paragraphs(
+        paragraphs: list[SourceParagraph], annotations: dict[UUID, int | None]
+    ) -> list[ChunkingParagraph]:
+        stack: list[SectionPathItem] = []
+        result: list[ChunkingParagraph] = []
+        for paragraph in paragraphs:
+            level = annotations.get(paragraph.id)
+            if level is not None:
+                while stack and stack[-1].level >= level:
+                    stack.pop()
+                stack.append(
+                    SectionPathItem(
+                        source_paragraph_id=paragraph.id,
+                        title=paragraph.normalized_text,
+                        level=level,
+                    )
+                )
+            result.append(
+                ChunkingParagraph(
+                    source_paragraph_id=paragraph.id,
+                    page_number=paragraph.page_number,
+                    paragraph_number=paragraph.paragraph_number,
+                    kind=(ParagraphKind.HEADING if level is not None else paragraph.kind),
+                    normalized_text=paragraph.normalized_text,
+                    heading_level=level,
+                    section_path=tuple(stack),
+                )
+            )
+        return result
 
     @staticmethod
     def _classify_failure(

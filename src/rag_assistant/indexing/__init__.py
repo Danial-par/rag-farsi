@@ -25,6 +25,12 @@ from rag_assistant.indexing.service import (
     IndexingResult,
     SourceIntegrityError,
 )
+from rag_assistant.indexing.structure import (
+    OpenRouterStructureAnnotator,
+    StructureAnnotationResponse,
+    StructureAnnotator,
+    heuristic_heading_levels,
+)
 from rag_assistant.indexing.storage import (
     LocalObjectStore,
     ObjectStore,
@@ -49,6 +55,10 @@ __all__ = [
     "ObjectStoreError",
     "OpenRouterEmbeddingClient",
     "ParagraphChunker",
+    "OpenRouterStructureAnnotator",
+    "StructureAnnotationResponse",
+    "StructureAnnotator",
+    "heuristic_heading_levels",
     "PermanentEmbeddingError",
     "RetryableEmbeddingError",
     "S3ObjectStore",

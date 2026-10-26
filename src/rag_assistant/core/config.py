@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     chat_connect_timeout_seconds: float = Field(default=10, gt=0, le=120)
     chat_read_timeout_seconds: float = Field(default=60, gt=0, le=600)
     chat_max_retries: int = Field(default=2, ge=0, le=5)
+    structure_annotation_enabled: bool = True
+    retrieval_planner_enabled: bool = True
+    retrieval_candidate_count: int = Field(default=30, ge=6, le=100)
+    retrieval_max_expanded_sections: int = Field(default=2, ge=0, le=8)
+    retrieval_section_max_characters: int = Field(default=24_000, ge=2_000, le=100_000)
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
     langfuse_base_url: AnyHttpUrl = AnyHttpUrl("https://cloud.langfuse.com")

@@ -11,6 +11,7 @@ from rag_assistant.indexing.chunking import (
     ChunkingError,
     ChunkingParagraph,
     ParagraphChunker,
+    SectionPathItem,
     TiktokenTokenCounter,
 )
 
@@ -207,6 +208,51 @@ def test_consecutive_headings_have_content_and_do_not_leak_into_next_section() -
     ]
     assert [ref.source_paragraph_id for ref in chunks[1].references] == [
         paragraph.source_paragraph_id for paragraph in paragraphs[3:]
+    ]
+
+
+def test_chunk_metadata_preserves_the_complete_parent_child_section_path() -> None:
+    parent_id = uuid4()
+    child_id = uuid4()
+    parent_path = (SectionPathItem(parent_id, "اجزای اصلی", 1),)
+    child_path = (
+        *parent_path,
+        SectionPathItem(child_id, "ورود اسناد", 2),
+    )
+    paragraphs = [
+        ChunkingParagraph(
+            source_paragraph_id=parent_id,
+            page_number=1,
+            paragraph_number=1,
+            kind=ParagraphKind.HEADING,
+            normalized_text="اجزای اصلی",
+            heading_level=1,
+            section_path=parent_path,
+        ),
+        ChunkingParagraph(
+            source_paragraph_id=child_id,
+            page_number=1,
+            paragraph_number=2,
+            kind=ParagraphKind.HEADING,
+            normalized_text="ورود اسناد",
+            heading_level=2,
+            section_path=child_path,
+        ),
+        ChunkingParagraph(
+            source_paragraph_id=uuid4(),
+            page_number=1,
+            paragraph_number=3,
+            kind=ParagraphKind.PROSE,
+            normalized_text="متن توضیحی",
+            section_path=child_path,
+        ),
+    ]
+
+    chunk = ParagraphChunker(WordCounter(), target_tokens=20, max_tokens=30).chunk(paragraphs)[0]
+
+    assert chunk.metadata["section_path"] == [
+        {"id": str(parent_id), "title": "اجزای اصلی", "level": 1},
+        {"id": str(child_id), "title": "ورود اسناد", "level": 2},
     ]
 
 

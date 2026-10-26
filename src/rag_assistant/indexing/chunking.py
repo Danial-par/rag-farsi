@@ -10,7 +10,7 @@ import tiktoken
 
 from rag_assistant.db.models import ParagraphKind
 
-CHUNKING_VERSION = "structure-aware-v2"
+CHUNKING_VERSION = "structure-aware-v3"
 _BOUNDARY_PATTERN = re.compile(r"[.!?؟؛:\n]\s*|\s+")
 
 
@@ -41,6 +41,15 @@ class ChunkingParagraph:
     paragraph_number: int
     kind: ParagraphKind
     normalized_text: str
+    heading_level: int | None = None
+    section_path: tuple[SectionPathItem, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SectionPathItem:
+    source_paragraph_id: UUID
+    title: str
+    level: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +132,10 @@ class ParagraphChunker:
         body: list[_Segment] = []
         for paragraph in paragraphs:
             segment = self._complete_segment(paragraph)
-            if paragraph.kind is ParagraphKind.HEADING:
+            is_heading = paragraph.heading_level is not None or (
+                paragraph.heading_level is None and paragraph.kind is ParagraphKind.HEADING
+            )
+            if is_heading:
                 if body:
                     yield headings, body
                     headings, body = [], []
@@ -325,6 +337,17 @@ class ParagraphChunker:
                 "has_list_context": any(
                     item.paragraph.kind is ParagraphKind.PROSE for item in context
                 ),
+                "section_path": [
+                    {
+                        "id": str(item.source_paragraph_id),
+                        "title": item.title,
+                        "level": item.level,
+                    }
+                    for item in (
+                        segments[-1].paragraph.section_path
+                        or (context[-1].paragraph.section_path if context else ())
+                    )
+                ],
             },
         )
 
