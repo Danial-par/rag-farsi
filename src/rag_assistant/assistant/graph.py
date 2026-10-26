@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import date, datetime
+from enum import Enum
 from time import perf_counter
 from typing import Any, NotRequired, TypedDict, cast
 from uuid import UUID
@@ -12,6 +14,7 @@ from uuid import UUID
 import structlog
 from langfuse import get_client, observe, propagate_attributes
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
 
 from rag_assistant.assistant.errors import ConversationAuthorizationError, WorkflowExecutionError
 from rag_assistant.assistant.models import (
@@ -58,6 +61,43 @@ class RAGState(TypedDict):
 
 NodeResult = dict[str, object]
 NodeAction = Callable[[], Awaitable[NodeResult]]
+
+_NODE_DESCRIPTIONS = {
+    "load_conversation": "Authorize the conversation and load recent completed messages for context.",
+    "create_execution": "Create or reuse the idempotent user and pending assistant message records.",
+    "prepare_question": "Prepare the current question for retrieval; conversation history is not used here.",
+    "retrieve_evidence": "Search only documents authorized for this conversation and return ranked evidence.",
+    "assess_evidence": "Decide whether retrieval returned any evidence that can be passed to generation.",
+    "abstain": "Create a citation-free abstention because retrieval returned no evidence.",
+    "generate_answer": "Generate a structured answer using the question, conversation context, and retrieved evidence.",
+    "validate_answer": "Check the answer outcome and ensure every cited chunk came from retrieval.",
+    "persist_completed": "Persist the validated answer and its immutable citation snapshot.",
+    "persist_failed": "Persist a terminal failure for the pending assistant message.",
+}
+
+
+def _trace_value(value: Any) -> Any:
+    """Convert workflow values into JSON-friendly, inspectable trace payloads."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _trace_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_trace_value(item) for item in value]
+    return value
+
+
+def _trace_state(state: RAGState) -> dict[str, Any]:
+    """Expose the useful request state while omitting internal ownership/idempotency keys."""
+    return _trace_value(
+        {key: value for key, value in state.items() if key not in {"user_id", "idempotency_key"}}
+    )
 
 
 class RAGWorkflow:
@@ -173,13 +213,28 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
         action: NodeAction,
     ) -> NodeResult:
         started = perf_counter()
+        client = get_client()
+        client.update_current_span(
+            input=_trace_state(state),
+            metadata={
+                "node_description": _NODE_DESCRIPTIONS[node_name],
+                "conversation_id": str(state["conversation_id"]),
+            },
+        )
         try:
             result = await action()
-            get_client().update_current_span(
-                metadata={"duration_ms": round((perf_counter() - started) * 1000, 2)}
+            client.update_current_span(
+                output=_trace_value(result),
+                metadata={"duration_ms": round((perf_counter() - started) * 1000, 2)},
             )
             return result
-        except IdempotencyConflictError:
+        except IdempotencyConflictError as exc:
+            client.update_current_span(
+                output={"error": "idempotency_conflict", "message": str(exc)},
+                metadata={"duration_ms": round((perf_counter() - started) * 1000, 2)},
+                level="ERROR",
+                status_message="idempotency_conflict",
+            )
             raise
         except Exception as exc:
             failure = _classify_failure(node_name, exc)
@@ -189,7 +244,8 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
                 error_type=type(exc).__name__,
                 error_code=failure.error_code,
             )
-            get_client().update_current_span(
+            client.update_current_span(
+                output={"failure": _trace_value(failure)},
                 metadata={
                     "duration_ms": round((perf_counter() - started) * 1000, 2),
                     "error_code": failure.error_code,
@@ -364,21 +420,24 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
 
     @observe(name="rag.persist_failed", capture_input=False, capture_output=False)
     async def persist_failed(state: RAGState) -> NodeResult:
-        failure = state["failure"]
-        output = await dependencies.persistence.fail_execution(
-            user_id=state["user_id"],
-            assistant_message_id=state["execution"].assistant_message_id,
-            error_code=failure.error_code,
-            error_message=failure.safe_message,
-        )
-        if output.status is not MessageStatus.FAILED:
-            raise WorkflowExecutionError("Persistence did not fail the assistant message")
-        await record_node(
-            state,
-            node_name="persist_failed",
-            extra={"failure_code": failure.error_code},
-        )
-        return {"output": output}
+        async def action() -> NodeResult:
+            failure = state["failure"]
+            output = await dependencies.persistence.fail_execution(
+                user_id=state["user_id"],
+                assistant_message_id=state["execution"].assistant_message_id,
+                error_code=failure.error_code,
+                error_message=failure.safe_message,
+            )
+            if output.status is not MessageStatus.FAILED:
+                raise WorkflowExecutionError("Persistence did not fail the assistant message")
+            await record_node(
+                state,
+                node_name="persist_failed",
+                extra={"failure_code": failure.error_code},
+            )
+            return {"output": output}
+
+        return await guarded(state, node_name="persist_failed", action=action)
 
     graph = StateGraph(RAGState)
     graph.add_node("load_conversation", load_conversation)

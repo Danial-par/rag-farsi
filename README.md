@@ -2,6 +2,12 @@
 
 A local, production-oriented RAG chat application for Persian PDF documents. It extracts and indexes documents in PostgreSQL with pgvector, answers through an OpenAI-compatible API, and returns citations with the physical page and paragraph number. The repository includes a FastAPI backend, ingestion worker, authentication, evaluation tools, and a minimal browser interface.
 
+## Answer orchestration
+
+Each chat request runs through a stateless LangGraph workflow. It first checks conversation access and loads up to 12 prior completed messages for conversational context, then creates or reuses the idempotent message execution. The current question is retrieved on its own from documents authorized for that conversation. If retrieval returns no chunks, the workflow abstains; otherwise it asks the structured answer model to answer only from the retrieved chunks. The answer is checked so its citations point only to retrieved chunks, then the completed answer and citation snapshot are persisted. Any failure after execution creation is recorded as a failed assistant message.
+
+Langfuse records a readable input and output for each graph node, along with a short node description and duration. Payloads include the current workflow state, retrieved evidence, generated candidate, validation result, and persisted result so a trace can be followed from question to answer.
+
 ## Local setup
 
 ### 1. Install the required tools
