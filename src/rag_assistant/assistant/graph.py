@@ -108,9 +108,11 @@ def _trace_value(value: Any) -> Any:
 
 def _trace_state(state: RAGState) -> dict[str, Any]:
     """Expose the useful request state while omitting internal ownership/idempotency keys."""
-    return _trace_value(
-        {key: value for key, value in state.items() if key not in {"user_id", "idempotency_key"}}
-    )
+    return {
+        key: _trace_value(value)
+        for key, value in state.items()
+        if key not in {"user_id", "idempotency_key"}
+    }
 
 
 class RAGWorkflow:
