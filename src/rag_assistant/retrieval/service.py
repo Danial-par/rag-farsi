@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import structlog
+from langfuse import get_client, observe
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_assistant.core.config import Settings
@@ -20,7 +22,14 @@ from rag_assistant.retrieval.models import (
     RetrievalResult,
 )
 from rag_assistant.retrieval.planner import RetrievalPlan, RetrievalPlanner
-from rag_assistant.retrieval.repository import RetrievalRepository, RetrievalScope
+from rag_assistant.retrieval.repository import (
+    EvidenceRecord,
+    ExpandedSectionRecord,
+    RetrievalRepository,
+    RetrievalScope,
+)
+
+_logger = structlog.stdlib.get_logger("rag_assistant.retrieval")
 
 
 class RetrievalService:
@@ -77,6 +86,14 @@ class RetrievalService:
             ),
             minimum_similarity=request.minimum_similarity,
         )
+        get_client().update_current_span(
+            metadata={
+                "retrieval_vector_candidate_count": len(records),
+                "retrieval_planner_status": (
+                    "pending" if self._planner is not None and records else "skipped"
+                ),
+            }
+        )
 
         context_records = []
         if self._planner is not None and records:
@@ -89,10 +106,38 @@ class RetrievalService:
                     candidates=records,
                     top_k=request.top_k,
                 )
-            except Exception:
+            except Exception as exc:
+                _logger.warning(
+                    "retrieval_planner_fell_back",
+                    error_type=type(exc).__name__,
+                    planner_validation_failure=getattr(exc, "failure_reason", None),
+                    candidate_count=len(records),
+                )
+                get_client().update_current_span(
+                    metadata={
+                        "retrieval_planner_status": "fallback",
+                        "retrieval_planner_error_type": type(exc).__name__,
+                        "retrieval_planner_validation_failure": getattr(
+                            exc, "failure_reason", None
+                        ),
+                    }
+                )
                 plan = RetrievalPlan(
                     chunk_ids=tuple(record.chunk_id for record in records[: request.top_k]),
-                    section_selections=(),
+                    section_selections=self._fallback_section_selections(records),
+                )
+                get_client().update_current_span(
+                    metadata={
+                        "retrieval_fallback_section_count": len(plan.section_selections),
+                    }
+                )
+            else:
+                get_client().update_current_span(
+                    metadata={
+                        "retrieval_planner_status": "completed",
+                        "retrieval_selected_chunk_count": len(plan.chunk_ids),
+                        "retrieval_selected_section_count": len(plan.section_selections),
+                    }
                 )
             records_by_id = {record.chunk_id: record for record in candidate_records}
             records = [records_by_id[item] for item in plan.chunk_ids if item in records_by_id]
@@ -151,11 +196,9 @@ class RetrievalService:
                     covered_paths.setdefault(version_id, set()).update(path_ids)
                     if len(selections) >= self._settings.retrieval_max_expanded_sections:
                         break
-            context_records = await self._repository.expand_sections(
-                user_id=request.user_id,
-                conversation_id=request.conversation_id,
+            context_records = await self._expand_sections(
+                request=request,
                 selections=selections,
-                max_characters=self._settings.retrieval_section_max_characters,
             )
 
         # Recheck after external model calls so ownership or configuration
@@ -185,6 +228,7 @@ class RetrievalService:
                         paragraph_number=citation.paragraph_number,
                         kind=citation.kind,
                         original_text=citation.original_text,
+                        normalized_text=citation.normalized_text,
                         start_offset=citation.start_offset,
                         end_offset=citation.end_offset,
                     )
@@ -194,6 +238,7 @@ class RetrievalService:
             )
             for record in records
         )
+
         return RetrievalResult(
             normalized_query=normalized_query,
             embedding_model=self._settings.embedding_model,
@@ -218,6 +263,7 @@ class RetrievalService:
                             paragraph_number=citation.paragraph_number,
                             kind=citation.kind,
                             original_text=citation.original_text,
+                            normalized_text=citation.normalized_text,
                             start_offset=None,
                             end_offset=None,
                         )
@@ -227,6 +273,47 @@ class RetrievalService:
                 for record in context_records
             ),
         )
+
+    @observe(name="rag.retrieval.expand_sections", capture_input=False, capture_output=False)
+    async def _expand_sections(
+        self,
+        *,
+        request: RetrievalRequest,
+        selections: list[tuple[UUID, UUID, tuple[str, ...]]],
+    ) -> list[ExpandedSectionRecord]:
+        records = await self._repository.expand_sections(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            selections=selections,
+            max_characters=self._settings.retrieval_section_max_characters,
+        )
+        get_client().update_current_span(
+            metadata={
+                "selected_section_count": len(selections),
+                "expanded_context_section_count": len(records),
+                "expanded_citation_source_count": sum(len(record.citations) for record in records),
+            }
+        )
+        return records
+
+    @staticmethod
+    def _fallback_section_selections(
+        records: tuple[EvidenceRecord, ...] | list[EvidenceRecord],
+    ) -> tuple[tuple[UUID, UUID], ...]:
+        """Expand the top vector hit's highest available parent if reranking fails."""
+        for record in records:
+            section_path = record.section_path
+            if not section_path:
+                continue
+            section_id = section_path[0].get("id")
+            if not isinstance(section_id, str):
+                continue
+            try:
+                parsed_section_id = UUID(section_id)
+            except ValueError:
+                continue
+            return ((record.document_version_id, parsed_section_id),)
+        return ()
 
     async def _inspect_scope(self, request: RetrievalRequest) -> RetrievalScope:
         return await self._repository.inspect_scope(

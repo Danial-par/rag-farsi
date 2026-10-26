@@ -78,6 +78,14 @@ class FixedRetrievalPlanner:
         return self.plan_result
 
 
+class FailedRetrievalPlanner:
+    async def plan(
+        self, *, question: str, candidates: Sequence[object], top_k: int
+    ) -> RetrievalPlan:
+        del question, candidates, top_k
+        raise ValueError("invalid structured output")
+
+
 @dataclass(frozen=True, slots=True)
 class IndexedDocument:
     document: Document
@@ -255,6 +263,56 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
     assert {
         source.source_paragraph_id for source in result.context_sections[0].citation_sources
     } == set(indexed.paragraph_ids[1:])
+
+
+async def test_retrieval_planner_failure_still_expands_top_candidate_parent(
+    db_session: AsyncSession,
+    settings: Settings,
+) -> None:
+    user = await _user(db_session, "planner-fallback@example.com")
+    parent_id = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+    section_path = [{"id": str(parent_id), "title": "اجزای اصلی RAG", "level": 1}]
+    indexed = await _indexed_document(
+        db_session,
+        key="documents/planner-fallback.pdf",
+        title="راهنمای RAG",
+        owner_id=user.id,
+        vectors=[_vector(1.0), _vector(0.8, 0.6), _vector(0.6, 0.8), _vector(0.4, 0.9)],
+        chunk_metadata=[{"section_path": section_path} for _ in range(4)],
+    )
+    conversation = await ConversationRepository(db_session).create(owner_id=user.id)
+    await ConversationRepository(db_session).add_document(
+        owner_id=user.id,
+        conversation_id=conversation.id,
+        document_id=indexed.document.id,
+    )
+    await db_session.flush()
+    async with AsyncSession(
+        bind=db_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    ) as retrieval_session:
+        service = RetrievalService(
+            session=retrieval_session,
+            embedding_client=QueryEmbeddingClient(),
+            settings=settings,
+            planner=FailedRetrievalPlanner(),
+        )
+        result = await service.retrieve(
+            RetrievalRequest(
+                user_id=user.id,
+                conversation_id=conversation.id,
+                question="اجزای اصلی یه سیستم RAG رو بگو",
+                top_k=1,
+            )
+        )
+
+    assert len(result.evidence) == 1
+    assert len(result.context_sections) == 1
+    assert result.context_sections[0].heading_path == ("اجزای اصلی RAG",)
+    assert {
+        source.source_paragraph_id for source in result.context_sections[0].citation_sources
+    } == set(indexed.paragraph_ids)
 
 
 async def test_retrieval_normalizes_ranks_thresholds_and_resolves_citations(
