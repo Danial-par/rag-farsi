@@ -152,6 +152,7 @@ async def run_live_evaluation(
                 session_factory,
                 user_id=user_id,
                 sample_id=sample_id,
+                version_id=version_id,
                 dataset_id=dataset.dataset_id,
                 case=case,
             )
@@ -336,10 +337,11 @@ async def _evaluation_conversation(
     *,
     user_id: UUID,
     sample_id: UUID,
+    version_id: UUID,
     dataset_id: str,
     case: EvaluationCase,
 ) -> UUID:
-    marker = f"sample-eval:{dataset_id}:{sample_id}:{case.case_id}"
+    marker = f"sample-eval:{dataset_id}:{sample_id}:{version_id}:{case.case_id}"
     async with session_factory.begin() as session:
         conversation = await session.scalar(
             select(Conversation).where(

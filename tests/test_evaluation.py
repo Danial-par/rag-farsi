@@ -4,7 +4,7 @@ import json
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker
@@ -24,6 +24,8 @@ from rag_assistant.extraction import PdfExtractor
 from rag_assistant.indexing.service import DocumentIndexingService
 from rag_assistant.indexing.storage import LocalObjectStore
 from rag_assistant.live_evaluation import (
+    _evaluation_conversation,
+    _evaluation_user,
     _read_checkpoint,
     _select_cases,
     _snapshot_units,
@@ -311,6 +313,26 @@ async def test_live_runner_uses_graph_retrieval_and_persists_snapshot(
     assert observations[0]["cited_units"] == observations[0]["persisted_units"]
     assert observations[0]["latency_ms"] > 0
     assert any(observations[0]["persisted_units"])
+
+    user_id = await _evaluation_user(session_factory, sample.document_id)
+    case = next(item for item in dataset.cases if item.case_id == "fa-rag-stages")
+    same_version_conversation = await _evaluation_conversation(
+        session_factory,
+        user_id=user_id,
+        sample_id=sample.document_id,
+        version_id=sample.version_id,
+        dataset_id=dataset.dataset_id,
+        case=case,
+    )
+    new_version_conversation = await _evaluation_conversation(
+        session_factory,
+        user_id=user_id,
+        sample_id=sample.document_id,
+        version_id=uuid4(),
+        dataset_id=dataset.dataset_id,
+        case=case,
+    )
+    assert new_version_conversation != same_version_conversation
 
     resumed = await run_live_evaluation(
         settings=local_settings,

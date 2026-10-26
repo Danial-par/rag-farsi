@@ -14,6 +14,7 @@ from rag_assistant.core.config import Settings
 from rag_assistant.db.models import Document, DocumentVersion, IngestionStatus
 from rag_assistant.db.repositories import DocumentRepository, NewDocumentVersion
 from rag_assistant.db.session import AsyncSessionFactory
+from rag_assistant.indexing.chunking import CHUNKING_VERSION
 from rag_assistant.indexing.storage import ObjectStore, ObjectStoreError
 
 SAMPLE_SEED_KEY = "sample_doc_pdf_v1"
@@ -47,7 +48,7 @@ async def seed_sample_document(
     if not payload or len(payload) > settings.max_pdf_upload_bytes:
         raise ValueError("Sample PDF is empty or exceeds the configured upload limit")
     digest = hashlib.sha256(payload).hexdigest()
-    object_key = f"documents/shared/sample-doc/{digest}.pdf"
+    ingestion_config = _sample_ingestion_config(settings)
 
     async with session_factory() as session, session.begin():
         # Serialize repeated local invocations before looking up the shared default.
@@ -96,7 +97,9 @@ async def seed_sample_document(
             ),
             None,
         )
-        if active is not None:
+        if active is not None and _active_version_matches_settings(
+            active, settings, ingestion_config
+        ):
             return SampleSeedResult(document.id, active.id, active.status, True)
 
         version = next(
@@ -122,6 +125,10 @@ async def seed_sample_document(
                 )
 
         if version is None:
+            next_version_number = (
+                max((item.version_number for item in matching_versions), default=0) + 1
+            )
+            object_key = f"documents/shared/sample-doc/{digest}/v{next_version_number}.pdf"
             await _ensure_sample_object(object_store, object_key, payload)
             version = await DocumentRepository(session).create_shared_version(
                 document_id=document.id,
@@ -131,16 +138,40 @@ async def seed_sample_document(
                     file_size_bytes=len(payload),
                     embedding_model=settings.embedding_model,
                     embedding_dimensions=settings.embedding_dimensions,
-                    ingestion_config={
-                        "chunk_target_tokens": settings.chunk_target_tokens,
-                        "chunk_max_tokens": settings.chunk_max_tokens,
-                        "chunk_paragraph_overlap": settings.chunk_paragraph_overlap,
-                    },
+                    ingestion_config=ingestion_config,
                 ),
             )
         else:
             await _ensure_sample_object(object_store, version.object_key, payload)
         return SampleSeedResult(document.id, version.id, version.status, False)
+
+
+def _sample_ingestion_config(settings: Settings) -> dict[str, object]:
+    annotation_enabled = (
+        settings.structure_annotation_enabled and settings.openrouter_api_key is not None
+    )
+    return {
+        "chunk_target_tokens": settings.chunk_target_tokens,
+        "chunk_max_tokens": settings.chunk_max_tokens,
+        "chunk_paragraph_overlap": settings.chunk_paragraph_overlap,
+        "chunking_version": CHUNKING_VERSION,
+        "structure_annotation_enabled": annotation_enabled,
+        "structure_annotation_model": settings.chat_model if annotation_enabled else None,
+    }
+
+
+def _active_version_matches_settings(
+    active: DocumentVersion,
+    settings: Settings,
+    ingestion_config: dict[str, object],
+) -> bool:
+    return (
+        active.embedding_model == settings.embedding_model
+        and active.embedding_dimensions == settings.embedding_dimensions
+        and all(
+            active.ingestion_config.get(key) == value for key, value in ingestion_config.items()
+        )
+    )
 
 
 async def _ensure_sample_object(object_store: ObjectStore, object_key: str, payload: bytes) -> None:

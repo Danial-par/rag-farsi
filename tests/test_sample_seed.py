@@ -87,6 +87,22 @@ async def test_sample_seed_is_idempotent_for_pending_and_active_versions(
     assert result.paragraph_count > 0
     assert result.chunk_count > 0
 
+    updated_settings = local_settings.model_copy(update={"chunk_target_tokens": 350})
+    reindexed = await seed_sample_document(
+        settings=updated_settings,
+        session_factory=session_factory,
+        object_store=store,
+        fixture_path=SAMPLE_PDF,
+    )
+
+    assert reindexed.document_id == first.document_id
+    assert reindexed.version_id != first.version_id
+    assert reindexed.status is IngestionStatus.PENDING
+    assert reindexed.already_active is False
+    async with session_factory() as session:
+        document = await session.get(Document, first.document_id)
+    assert document is not None and document.active_version_id == first.version_id
+
 
 async def test_sample_seed_refuses_non_local_environment(settings: Settings) -> None:
     with pytest.raises(ValueError, match="APP_ENV=local"):
