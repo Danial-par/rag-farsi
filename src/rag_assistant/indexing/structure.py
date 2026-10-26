@@ -142,8 +142,6 @@ class OpenRouterStructureAnnotator:
             for item in parsed.paragraphs:
                 paragraph = batch[item.alias]
                 if paragraph.kind not in {ParagraphKind.HEADING, ParagraphKind.PROSE}:
-                    if item.heading_level is not None:
-                        raise ValueError("A caption, table row, or list item cannot be a heading")
                     continue
                 if item.heading_level is not None or paragraph.kind is not ParagraphKind.HEADING:
                     labels[paragraph.id] = item.heading_level

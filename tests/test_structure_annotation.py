@@ -35,7 +35,7 @@ class AliasAwareModel:
                 paragraphs=[
                     {
                         "alias": item["alias"],
-                        "heading_level": 1 if item["text"].startswith("عنوان") else None,
+                        "heading_level": (1 if item["text"].startswith(("عنوان", "•")) else None),
                     }
                     for item in paragraphs
                 ]
