@@ -10,6 +10,7 @@ from rag_assistant.retrieval.errors import (
 from rag_assistant.retrieval.models import (
     CitationSource,
     EvidenceChunk,
+    EvidenceSection,
     RetrievalRequest,
     RetrievalResult,
 )
@@ -18,6 +19,7 @@ from rag_assistant.retrieval.service import RetrievalService
 __all__ = [
     "CitationSource",
     "EvidenceChunk",
+    "EvidenceSection",
     "IncompatibleEmbeddingConfigurationError",
     "InvalidRetrievalQueryError",
     "RetrievalError",

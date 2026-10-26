@@ -384,7 +384,8 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
                 state,
                 node_name="generate_answer",
                 extra={
-                    "candidate_citation_count": len(candidate.cited_chunk_ids),
+                    "candidate_citation_count": len(candidate.cited_chunk_ids)
+                    + len(candidate.cited_paragraph_ids),
                     **usage_metadata,
                 },
             )
@@ -408,7 +409,10 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
             await record_node(
                 state,
                 node_name="validate_answer",
-                extra={"validated_citation_count": len(validated_answer.cited_chunk_ids)},
+                extra={
+                    "validated_citation_count": len(validated_answer.cited_chunk_ids)
+                    + len(validated_answer.cited_paragraph_ids)
+                },
             )
             return {"validated_answer": validated_answer}
 
@@ -582,7 +586,9 @@ def _classify_failure(node_name: str, exc: Exception) -> WorkflowFailure:
 def _enforce_evidence_binding(answer: AnswerCandidate, evidence: RetrievalResult) -> None:
     if not answer.content.strip():
         raise ValueError("Validated answer content cannot be blank")
-    citation_ids = answer.cited_chunk_ids
+    if answer.cited_chunk_ids and answer.cited_paragraph_ids:
+        raise ValueError("Citation types cannot be mixed")
+    citation_ids = answer.cited_chunk_ids or answer.cited_paragraph_ids
     if len(set(citation_ids)) != len(citation_ids):
         raise ValueError("Validated answer citation identifiers must be unique")
     if answer.outcome is AnswerOutcome.ABSTAINED:
@@ -603,6 +609,17 @@ def _enforce_evidence_binding(answer: AnswerCandidate, evidence: RetrievalResult
         raise ValueError("Partial answer content must state its unsupported portion")
     if answer.outcome is AnswerOutcome.FULLY_ANSWERED and answer.unsupported_content:
         raise ValueError("Fully answered results cannot contain unsupported portions")
-    retrieved_ids = {chunk.chunk_id for chunk in evidence.evidence}
+    if answer.cited_chunk_ids:
+        retrieved_ids = {chunk.chunk_id for chunk in evidence.evidence}
+    else:
+        retrieved_ids = {
+            source.source_paragraph_id
+            for chunk in evidence.evidence
+            for source in chunk.citation_sources
+        } | {
+            source.source_paragraph_id
+            for section in evidence.context_sections
+            for source in section.citation_sources
+        }
     if not set(citation_ids).issubset(retrieved_ids):
         raise ValueError("Validated answer cited evidence that was not retrieved")

@@ -50,6 +50,22 @@ class EvidenceChunk(BaseModel):
     token_count: int = Field(ge=1)
     cosine_similarity: float
     citation_sources: tuple[CitationSource, ...] = Field(min_length=1)
+    section_path: tuple[dict[str, object], ...] = ()
+
+
+class EvidenceSection(BaseModel):
+    """A reconstructed, source-backed parent section included for generation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    section_id: UUID
+    document_id: UUID
+    document_version_id: UUID
+    document_title: str
+    heading_path: tuple[str, ...]
+    normalized_text: str
+    citation_sources: tuple[CitationSource, ...] = Field(min_length=1)
+    truncated: bool = False
 
 
 class RetrievalResult(BaseModel):
@@ -61,3 +77,4 @@ class RetrievalResult(BaseModel):
     embedding_model: str
     embedding_dimensions: int = Field(ge=1)
     evidence: tuple[EvidenceChunk, ...]
+    context_sections: tuple[EvidenceSection, ...] = ()

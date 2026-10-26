@@ -8,13 +8,13 @@ from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-import httpx
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag_assistant.assistant.models import AnswerCandidate, ConversationHistoryMessage
 from rag_assistant.core.config import Settings
+from rag_assistant.core.model_client import create_chat_model as _create_chat_model
 from rag_assistant.db.models import AnswerOutcome
 from rag_assistant.retrieval import RetrievalResult
 
@@ -128,21 +128,7 @@ class EvidenceAnswerValidator:
 
 def create_chat_model(settings: Settings) -> ChatOpenAI:
     """Create the configured OpenRouter-compatible ChatOpenAI model."""
-    if settings.openrouter_api_key is None:
-        raise ValueError("OPENROUTER_API_KEY is required for answer generation")
-    return ChatOpenAI(
-        model=settings.chat_model,
-        api_key=settings.openrouter_api_key.get_secret_value(),
-        base_url=str(settings.openrouter_base_url),
-        timeout=httpx.Timeout(
-            connect=settings.chat_connect_timeout_seconds,
-            read=settings.chat_read_timeout_seconds,
-            write=settings.chat_read_timeout_seconds,
-            pool=settings.chat_connect_timeout_seconds,
-        ),
-        max_retries=settings.chat_max_retries,
-        reasoning_effort=settings.chat_reasoning_effort,
-    )
+    return _create_chat_model(settings)
 
 
 def _generation_messages(
@@ -151,24 +137,66 @@ def _generation_messages(
     evidence: RetrievalResult,
     aliases: dict[str, Any],
 ) -> list[SystemMessage | HumanMessage]:
-    aliases_by_chunk_id = {chunk.chunk_id: alias for alias, chunk in aliases.items()}
+    aliases_by_chunk_id = {
+        value.chunk_id: alias for alias, value in aliases.items() if hasattr(value, "chunk_id")
+    }
+    aliases_by_source_id = {
+        value.source_paragraph_id: alias
+        for alias, value in aliases.items()
+        if hasattr(value, "source_paragraph_id")
+    }
+    expanded_source_ids = {
+        source.source_paragraph_id
+        for section in evidence.context_sections
+        for source in section.citation_sources
+    }
+    can_use_complete_sections = bool(evidence.context_sections) and not any(
+        section.truncated for section in evidence.context_sections
+    )
     evidence_chunks = []
     for chunk in evidence.evidence:
-        evidence_chunks.append(
-            {
-                "alias": aliases_by_chunk_id[chunk.chunk_id],
-                "document_title": chunk.document_title,
-                "page_start": min(source.page_number for source in chunk.citation_sources),
-                "page_end": max(source.page_number for source in chunk.citation_sources),
-                "chunk_text": chunk.normalized_text,
-            }
-        )
+        payload: dict[str, object] = {
+            "citation_aliases": [
+                aliases_by_source_id[source.source_paragraph_id]
+                for source in chunk.citation_sources
+                if source.source_paragraph_id in aliases_by_source_id
+            ],
+            **(
+                {"alias": aliases_by_chunk_id[chunk.chunk_id]}
+                if chunk.chunk_id in aliases_by_chunk_id
+                else {}
+            ),
+            "document_title": chunk.document_title,
+            "page_start": min(source.page_number for source in chunk.citation_sources),
+            "page_end": max(source.page_number for source in chunk.citation_sources),
+        }
+        chunk_source_ids = {source.source_paragraph_id for source in chunk.citation_sources}
+        if can_use_complete_sections and chunk_source_ids <= expanded_source_ids:
+            payload["text_supplied_by_expanded_section"] = True
+        else:
+            payload["chunk_text"] = chunk.normalized_text
+        evidence_chunks.append(payload)
     payload = {
         "question": question,
         "conversation_history_context_only": [
             {"role": message.role.value, "content": message.content} for message in history
         ],
         "retrieved_evidence_only": evidence_chunks,
+        "expanded_source_sections_only": [
+            {
+                "document_title": section.document_title,
+                "heading_path": section.heading_path,
+                "section_text": section.normalized_text,
+                "section_truncated": section.truncated,
+                "citation_aliases": [
+                    alias
+                    for alias, source in aliases.items()
+                    if getattr(source, "source_paragraph_id", None)
+                    in {citation.source_paragraph_id for citation in section.citation_sources}
+                ],
+            }
+            for section in evidence.context_sections
+        ],
     }
     system = (
         "You answer questions using only the retrieved document evidence in the user message. "
@@ -202,7 +230,11 @@ def _abstention_message(question: str) -> str:
 def _citation_aliases(evidence: RetrievalResult) -> dict[str, Any]:
     sources: dict[UUID, Any] = {}
     for chunk in evidence.evidence:
-        sources.setdefault(chunk.chunk_id, chunk)
+        for source in chunk.citation_sources:
+            sources.setdefault(source.source_paragraph_id, source)
+    for section in evidence.context_sections:
+        for source in section.citation_sources:
+            sources.setdefault(source.source_paragraph_id, source)
     return {f"E{index}": source for index, source in enumerate(sources.values(), start=1)}
 
 
@@ -213,8 +245,10 @@ def _candidate_from_structured(
     raw: Any,
 ) -> AnswerCandidate:
     outcome = AnswerOutcome(structured.outcome)
-    selected_ids: list[UUID] = []
+    selected_chunk_ids: list[UUID] = []
+    selected_paragraph_ids: list[UUID] = []
     rendered_claims: list[str] = []
+    marker_by_alias: dict[str, int] = {}
     for claim in structured.claims:
         if not claim.text.strip() or not claim.citations:
             raise ValueError("Every answer claim requires text and citations")
@@ -223,16 +257,17 @@ def _candidate_from_structured(
         for alias in claim.citations:
             if not _ALIAS_PATTERN.fullmatch(alias) or alias not in aliases:
                 raise ValueError("The answer selected an unknown citation alias")
-            chunk_id = aliases[alias].chunk_id
-            if chunk_id in selected_ids:
-                raise ValueError("Citation aliases cannot be duplicated across claims")
-            selected_ids.append(chunk_id)
-        citation_markers = ", ".join(
-            f"{index}"
-            for index, alias in enumerate(
-                claim.citations, start=len(selected_ids) - len(claim.citations) + 1
-            )
-        )
+            source = aliases[alias]
+            source_id = getattr(source, "source_paragraph_id", None)
+            if source_id is not None:
+                if source_id not in selected_paragraph_ids:
+                    selected_paragraph_ids.append(source_id)
+            else:
+                chunk_id = source.chunk_id
+                if chunk_id not in selected_chunk_ids:
+                    selected_chunk_ids.append(chunk_id)
+            marker_by_alias.setdefault(alias, len(marker_by_alias) + 1)
+        citation_markers = ", ".join(str(marker_by_alias[alias]) for alias in claim.citations)
         rendered_claims.append(f"{claim.text.strip()} [{citation_markers}]")
 
     if outcome is AnswerOutcome.ABSTAINED:
@@ -270,7 +305,8 @@ def _candidate_from_structured(
     return AnswerCandidate(
         content=content,
         outcome=outcome,
-        cited_chunk_ids=tuple(selected_ids),
+        cited_chunk_ids=tuple(selected_chunk_ids),
+        cited_paragraph_ids=tuple(selected_paragraph_ids),
         unsupported_content=unsupported,
         model_usage=_safe_usage(raw),
         provider_metadata=_safe_provider_metadata(raw),
@@ -280,10 +316,23 @@ def _candidate_from_structured(
 def _validate_candidate(candidate: AnswerCandidate, evidence: RetrievalResult) -> None:
     if not candidate.content.strip():
         raise ValueError("Validated answer content cannot be blank")
-    citation_ids = candidate.cited_chunk_ids
+    if candidate.cited_chunk_ids and candidate.cited_paragraph_ids:
+        raise ValueError("Citation types cannot be mixed")
+    citation_ids = candidate.cited_chunk_ids or candidate.cited_paragraph_ids
     if len(set(citation_ids)) != len(citation_ids):
         raise ValueError("Answer citation identifiers must be unique")
-    available_ids = {chunk.chunk_id for chunk in evidence.evidence}
+    if candidate.cited_chunk_ids:
+        available_ids = {chunk.chunk_id for chunk in evidence.evidence}
+    else:
+        available_ids = {
+            source.source_paragraph_id
+            for chunk in evidence.evidence
+            for source in chunk.citation_sources
+        } | {
+            source.source_paragraph_id
+            for section in evidence.context_sections
+            for source in section.citation_sources
+        }
     if not set(citation_ids).issubset(available_ids):
         raise ValueError("Answer citations must come from retrieved evidence")
     if candidate.outcome is AnswerOutcome.ABSTAINED:

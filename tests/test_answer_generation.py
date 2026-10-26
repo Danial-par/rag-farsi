@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from types import SimpleNamespace
 from uuid import uuid4
@@ -15,12 +16,18 @@ from rag_assistant.assistant.generation import (
     OpenRouterAnswerGenerator,
     StructuredAnswer,
     _generation_messages,
+    _citation_aliases,
     create_chat_model,
 )
 from rag_assistant.assistant.models import AnswerCandidate, ConversationHistoryMessage
 from rag_assistant.core.config import Settings
 from rag_assistant.db.models import AnswerOutcome, MessageRole, ParagraphKind
-from rag_assistant.retrieval import CitationSource, EvidenceChunk, RetrievalResult
+from rag_assistant.retrieval import (
+    CitationSource,
+    EvidenceChunk,
+    EvidenceSection,
+    RetrievalResult,
+)
 
 
 def _evidence(*, text: str = "شواهد مرتبط") -> RetrievalResult:
@@ -160,7 +167,9 @@ async def test_generator_maps_aliases_to_claim_citations_and_safe_usage_metadata
     )
 
     assert answer.outcome is AnswerOutcome.FULLY_ANSWERED
-    assert answer.cited_chunk_ids == (evidence.evidence[0].chunk_id,)
+    assert answer.cited_paragraph_ids == (
+        evidence.evidence[0].citation_sources[0].source_paragraph_id,
+    )
     assert answer.content == "تهران پایتخت ایران است. [1]"
     assert answer.model_usage == {"input_tokens": 31, "output_tokens": 16, "total_tokens": 47}
     assert answer.provider_metadata == {
@@ -225,7 +234,7 @@ async def test_irrelevant_nonempty_evidence_can_return_citation_free_abstention(
 
 
 @pytest.mark.asyncio
-async def test_unknown_or_duplicate_aliases_are_rejected() -> None:
+async def test_unknown_alias_is_rejected_after_retry() -> None:
     evidence = _evidence()
     unknown = FakeStructuredModel(
         [
@@ -243,7 +252,11 @@ async def test_unknown_or_duplicate_aliases_are_rejected() -> None:
         )
     assert unknown.calls == 2
 
-    repeated = FakeStructuredModel(
+
+@pytest.mark.asyncio
+async def test_same_source_can_support_multiple_claims_and_is_persisted_once() -> None:
+    evidence = _evidence()
+    model = FakeStructuredModel(
         [
             _response(
                 AnswerOutcome.FULLY_ANSWERED,
@@ -251,21 +264,40 @@ async def test_unknown_or_duplicate_aliases_are_rejected() -> None:
                     AnswerClaim(text="ادعای یک", citations=["E1"]),
                     AnswerClaim(text="ادعای دو", citations=["E1"]),
                 ],
+            )
+        ]
+    )
+
+    answer = await OpenRouterAnswerGenerator(model=model).generate(
+        question="پرسش", history=(), evidence=evidence
+    )
+
+    assert answer.cited_paragraph_ids == (
+        evidence.evidence[0].citation_sources[0].source_paragraph_id,
+    )
+    assert answer.content == "ادعای یک [1]\nادعای دو [1]"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_alias_within_one_claim_is_rejected() -> None:
+    model = FakeStructuredModel(
+        [
+            _response(
+                AnswerOutcome.FULLY_ANSWERED,
+                claims=[AnswerClaim(text="پاسخ", citations=["E1", "E1"])],
             ),
             _response(
                 AnswerOutcome.FULLY_ANSWERED,
-                claims=[
-                    AnswerClaim(text="ادعای یک", citations=["E1"]),
-                    AnswerClaim(text="ادعای دو", citations=["E1"]),
-                ],
+                claims=[AnswerClaim(text="پاسخ", citations=["E1", "E1"])],
             ),
         ]
     )
-    with pytest.raises(ValueError, match="duplicated"):
-        await OpenRouterAnswerGenerator(model=repeated).generate(
-            question="پرسش", history=(), evidence=evidence
+    with pytest.raises(ValueError, match="repeat citation aliases"):
+        await OpenRouterAnswerGenerator(model=model).generate(
+            question="پرسش", history=(), evidence=_evidence()
         )
-    assert repeated.calls == 2
+    assert model.calls == 2
 
 
 @pytest.mark.asyncio
@@ -341,6 +373,34 @@ async def test_prompt_separates_history_question_and_untrusted_evidence() -> Non
     assert '"page_start": 3' in prompt
     assert "multiple separable requested parts" in prompt
     assert "Never add tangential claims to avoid abstaining" in prompt
+
+
+def test_prompt_uses_complete_expanded_parent_without_repeating_chunk_text() -> None:
+    evidence = _evidence(text="بخش کامل‌شده")
+    chunk = evidence.evidence[0]
+    source = chunk.citation_sources[0]
+    expanded = evidence.model_copy(
+        update={
+            "context_sections": (
+                EvidenceSection(
+                    section_id=source.source_paragraph_id,
+                    document_id=source.document_id,
+                    document_version_id=source.document_version_id,
+                    document_title=source.document_title,
+                    heading_path=("بخش اصلی",),
+                    normalized_text="بخش کامل‌شده",
+                    citation_sources=(source,),
+                ),
+            )
+        }
+    )
+
+    messages = _generation_messages("پرسش", (), expanded, _citation_aliases(expanded))
+    payload = json.loads(messages[1].content)
+
+    assert "chunk_text" not in payload["retrieved_evidence_only"][0]
+    assert payload["retrieved_evidence_only"][0]["text_supplied_by_expanded_section"] is True
+    assert payload["expanded_source_sections_only"][0]["citation_aliases"] == ["E1"]
 
 
 @pytest.mark.asyncio
