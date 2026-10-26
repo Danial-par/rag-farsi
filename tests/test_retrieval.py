@@ -155,7 +155,7 @@ async def _indexed_document(
                 token_count=5,
                 embedding=vector,
                 paragraphs=[ChunkParagraphReference(source_paragraph_id=paragraph.id)],
-                metadata=chunk_metadata[index - 1] if chunk_metadata is not None else {},
+                metadata=chunk_metadata[ordinal - 1] if chunk_metadata is not None else {},
             ),
         )
     await repository.mark_succeeded(version.id, extraction_metadata={})
@@ -193,14 +193,21 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
 ) -> None:
     user = await _user(db_session, "section-expansion@example.com")
     parent_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    sibling_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
     section_path = [{"id": str(parent_id), "title": "اجزای اصلی RAG", "level": 1}]
+    sibling_path = [{"id": str(sibling_id), "title": "بخش دیگر", "level": 1}]
     indexed = await _indexed_document(
         db_session,
         key="documents/sectioned.pdf",
         title="راهنمای RAG",
         owner_id=user.id,
-        vectors=[_vector(1.0), _vector(0.8, 0.6), _vector(0.6, 0.8)],
-        chunk_metadata=[{"section_path": section_path} for _ in range(3)],
+        vectors=[_vector(1.0), _vector(0.8, 0.6), _vector(0.6, 0.8), _vector(0.4, 0.9)],
+        chunk_metadata=[
+            {"section_path": sibling_path},
+            {"section_path": section_path},
+            {"section_path": section_path},
+            {"section_path": section_path},
+        ],
     )
     conversations = ConversationRepository(db_session)
     conversation = await conversations.create(owner_id=user.id)
@@ -216,7 +223,7 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
             .order_by(Chunk.ordinal)
         )
     )
-    assert len(chunk_ids) == 3
+    assert len(chunk_ids) == 4
     planner = FixedRetrievalPlanner(
         chunk_ids=(chunk_ids[0],),
         section_selections=((indexed.version.id, parent_id),),
@@ -247,7 +254,7 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
     assert result.context_sections[0].heading_path == ("اجزای اصلی RAG",)
     assert {
         source.source_paragraph_id for source in result.context_sections[0].citation_sources
-    } == set(indexed.paragraph_ids)
+    } == set(indexed.paragraph_ids[1:])
 
 
 async def test_retrieval_normalizes_ranks_thresholds_and_resolves_citations(

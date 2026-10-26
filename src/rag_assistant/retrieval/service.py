@@ -80,6 +80,7 @@ class RetrievalService:
 
         context_records = []
         if self._planner is not None and records:
+            candidate_records = tuple(records)
             # Release the read transaction while the independent reranking call runs.
             await self._repository.release_read_transaction()
             try:
@@ -93,7 +94,7 @@ class RetrievalService:
                     chunk_ids=tuple(record.chunk_id for record in records[: request.top_k]),
                     section_selections=(),
                 )
-            records_by_id = {record.chunk_id: record for record in records}
+            records_by_id = {record.chunk_id: record for record in candidate_records}
             records = [records_by_id[item] for item in plan.chunk_ids if item in records_by_id]
             if not records:
                 records = list(records_by_id.values())[: request.top_k]
@@ -109,7 +110,7 @@ class RetrievalService:
                 record = next(
                     (
                         candidate
-                        for candidate in records
+                        for candidate in candidate_records
                         if candidate.document_version_id == version_id
                         and any(
                             item.get("id") == str(section_id) for item in candidate.section_path
