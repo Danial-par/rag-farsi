@@ -46,15 +46,28 @@ def test_sample_evaluation_units_resolve_to_extracted_citation_paragraphs() -> N
         f"{item.page_number}:{item.paragraph_number}" for item in extraction.paragraphs
     }
 
-    assert len(dataset.cases) == 31
+    assert len(dataset.cases) == 32
     assert Counter(case.category for case in dataset.cases) == {
-        "persian_supported": 13,
+        "persian_supported": 14,
         "english_supported": 5,
         "partial": 4,
         "unsupported": 6,
         "adversarial_noisy": 3,
     }
     assert all(set(case.expected_units) <= persisted_units for case in dataset.cases)
+    colloquial_case = next(
+        case for case in dataset.cases if case.case_id == "fa-rag-components-colloquial"
+    )
+    assert colloquial_case.question == "اجزای اصلی یه سیستم rag رو بگو"
+    assert colloquial_case.expected_units == (
+        "2:1",
+        "2:4",
+        "2:7",
+        "3:5",
+        "4:1",
+        "4:3",
+        "5:1",
+    )
     assert any(any(ord(character) > 127 for character in case.question) for case in dataset.cases)
     assert any(case.question.isascii() for case in dataset.cases)
 
@@ -102,7 +115,7 @@ def test_evaluation_reports_advisory_retrieval_regression_and_invalid_citations(
 
     assert report.retrieval_recall_at_k == 0.0
     assert report.context_source_recall == 0.0
-    assert report.citation_validity == pytest.approx(7 / 31)
+    assert report.citation_validity == pytest.approx(7 / 32)
     assert report.outcome_accuracy == 0.0
     assert report.abstention_accuracy < 1.0
     assert report.warnings
@@ -124,10 +137,10 @@ def test_metric_percentiles_latency_and_token_totals() -> None:
     )
     report = score_evaluation(dataset, observations)
 
-    assert report.average_latency_ms == 150
-    assert report.p50_latency_ms == 150
+    assert report.average_latency_ms == 155
+    assert report.p50_latency_ms == 160
     assert report.p95_latency_ms == 290
-    assert report.token_usage_totals == {"input_tokens": 62, "total_tokens": 93}
+    assert report.token_usage_totals == {"input_tokens": 64, "total_tokens": 96}
 
 
 def test_recall_at_five_counts_ranked_chunks_not_flattened_paragraphs() -> None:
