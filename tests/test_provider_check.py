@@ -35,7 +35,7 @@ def test_chat_reasoning_effort_defaults_to_none_and_reaches_chat_model(
         def __init__(self, **kwargs: Any) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr("rag_assistant.assistant.generation.ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr("rag_assistant.core.model_client.ChatOpenAI", FakeChatOpenAI)
     settings = _settings()
 
     create_chat_model(settings)

@@ -25,17 +25,17 @@ from rag_assistant.indexing.service import (
     IndexingResult,
     SourceIntegrityError,
 )
-from rag_assistant.indexing.structure import (
-    OpenRouterStructureAnnotator,
-    StructureAnnotationResponse,
-    StructureAnnotator,
-    heuristic_heading_levels,
-)
 from rag_assistant.indexing.storage import (
     LocalObjectStore,
     ObjectStore,
     ObjectStoreError,
     S3ObjectStore,
+)
+from rag_assistant.indexing.structure import (
+    OpenRouterStructureAnnotator,
+    StructureAnnotationResponse,
+    StructureAnnotator,
+    heuristic_heading_levels,
 )
 
 __all__ = [

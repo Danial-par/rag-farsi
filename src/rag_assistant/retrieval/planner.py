@@ -33,10 +33,17 @@ class RetrievalPlan(BaseModel):
 
 
 class RetrievalCandidate(Protocol):
-    chunk_id: UUID
-    document_version_id: UUID
-    normalized_text: str
-    section_path: tuple[dict[str, object], ...]
+    @property
+    def chunk_id(self) -> UUID: ...
+
+    @property
+    def document_version_id(self) -> UUID: ...
+
+    @property
+    def normalized_text(self) -> str: ...
+
+    @property
+    def section_path(self) -> tuple[dict[str, object], ...]: ...
 
 
 class _StructuredRunnable(Protocol):

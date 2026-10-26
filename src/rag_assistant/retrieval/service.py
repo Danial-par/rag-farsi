@@ -19,7 +19,7 @@ from rag_assistant.retrieval.models import (
     RetrievalRequest,
     RetrievalResult,
 )
-from rag_assistant.retrieval.planner import RetrievalPlanner, RetrievalPlan
+from rag_assistant.retrieval.planner import RetrievalPlan, RetrievalPlanner
 from rag_assistant.retrieval.repository import RetrievalRepository, RetrievalScope
 
 

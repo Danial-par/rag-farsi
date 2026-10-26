@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Awaitable, Callable
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 from uuid import UUID
 
@@ -96,7 +95,7 @@ class OpenRouterStructureAnnotator:
                 }
                 for alias, paragraph in batch.items()
             ]
-            prompt = [
+            prompt: list[SystemMessage | HumanMessage] = [
                 SystemMessage(
                     content=(
                         "Identify the document's section-heading hierarchy from these ordered "
@@ -158,12 +157,11 @@ def heuristic_heading_levels(
     """Use deterministic extraction labels when annotation is disabled or unavailable."""
     result: dict[UUID, int | None] = {}
     for paragraph in paragraphs:
+        nested_heading = _NESTED_HEADING.match(paragraph.normalized_text)
         if paragraph.kind is not ParagraphKind.HEADING:
             result[paragraph.id] = None
-        elif _NESTED_HEADING.match(paragraph.normalized_text):
-            result[paragraph.id] = max(
-                2, len(_NESTED_HEADING.match(paragraph.normalized_text).group(0).split("."))
-            )  # type: ignore[union-attr]
+        elif nested_heading is not None:
+            result[paragraph.id] = max(2, len(nested_heading.group(0).split(".")))
         elif _LETTERED_HEADING.match(paragraph.normalized_text):
             result[paragraph.id] = 3
         elif _NUMBERED_HEADING.match(paragraph.normalized_text):

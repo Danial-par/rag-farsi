@@ -15,8 +15,8 @@ from rag_assistant.assistant.generation import (
     EvidenceAnswerValidator,
     OpenRouterAnswerGenerator,
     StructuredAnswer,
-    _generation_messages,
     _citation_aliases,
+    _generation_messages,
     create_chat_model,
 )
 from rag_assistant.assistant.models import AnswerCandidate, ConversationHistoryMessage
@@ -396,7 +396,9 @@ def test_prompt_uses_complete_expanded_parent_without_repeating_chunk_text() -> 
     )
 
     messages = _generation_messages("پرسش", (), expanded, _citation_aliases(expanded))
-    payload = json.loads(messages[1].content)
+    payload_message = messages[1].content
+    assert isinstance(payload_message, str)
+    payload = json.loads(payload_message)
 
     assert "chunk_text" not in payload["retrieved_evidence_only"][0]
     assert payload["retrieved_evidence_only"][0]["text_supplied_by_expanded_section"] is True

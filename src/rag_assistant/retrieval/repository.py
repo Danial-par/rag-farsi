@@ -69,6 +69,15 @@ class ExpandedSectionRecord:
 
 
 @dataclass(slots=True)
+class _ExpandedSectionBuilder:
+    document_id: UUID
+    document_version_id: UUID
+    document_title: str
+    heading_path: tuple[str, ...]
+    citations: dict[UUID, CitationRecord]
+
+
+@dataclass(slots=True)
 class _EvidenceBuilder:
     row: RowMapping
     citations: list[tuple[int, CitationRecord]]
@@ -302,7 +311,7 @@ class RetrievalRepository:
             )
         )
         rows = (await self._session.execute(statement)).mappings().all()
-        sections: dict[tuple[UUID, UUID], dict[str, object]] = {}
+        sections: dict[tuple[UUID, UUID], _ExpandedSectionBuilder] = {}
         for row in rows:
             row_path = (row["chunk_metadata"] or {}).get("section_path", [])
             for version_id, section_id, heading_path in selections:
@@ -311,20 +320,18 @@ class RetrievalRepository:
                 ):
                     continue
                 key = (version_id, section_id)
-                section = sections.setdefault(
-                    key,
-                    {
-                        "document_id": row["document_id"],
-                        "document_version_id": version_id,
-                        "document_title": row["document_title"],
-                        "heading_path": heading_path,
-                        "citations": {},
-                    },
-                )
-                citation_map = section["citations"]
-                assert isinstance(citation_map, dict)
+                section = sections.get(key)
+                if section is None:
+                    section = _ExpandedSectionBuilder(
+                        document_id=row["document_id"],
+                        document_version_id=version_id,
+                        document_title=row["document_title"],
+                        heading_path=heading_path,
+                        citations={},
+                    )
+                    sections[key] = section
                 source_id = row["source_paragraph_id"]
-                citation_map.setdefault(
+                section.citations.setdefault(
                     source_id,
                     CitationRecord(
                         source_paragraph_id=source_id,
@@ -343,10 +350,8 @@ class RetrievalRepository:
             section = sections.get((version_id, section_id))
             if section is None:
                 continue
-            citation_map = section["citations"]
-            assert isinstance(citation_map, dict)
             citations = sorted(
-                citation_map.values(),
+                section.citations.values(),
                 key=lambda item: (item.page_number, item.paragraph_number),
             )
             text_parts: list[str] = []
@@ -369,10 +374,10 @@ class RetrievalRepository:
             expanded.append(
                 ExpandedSectionRecord(
                     section_id=section_id,
-                    document_id=section["document_id"],
+                    document_id=section.document_id,
                     document_version_id=version_id,
-                    document_title=section["document_title"],
-                    heading_path=section["heading_path"],
+                    document_title=section.document_title,
+                    heading_path=section.heading_path,
                     normalized_text="\n\n".join(text_parts),
                     citations=tuple(included),
                     truncated=truncated,

@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage
 
-from rag_assistant.db.models import ParagraphKind
+from rag_assistant.db.models import ParagraphKind, SourceParagraph
 from rag_assistant.indexing.structure import (
+    AnnotatedParagraph,
     OpenRouterStructureAnnotator,
     StructureAnnotationResponse,
     heuristic_heading_levels,
@@ -33,10 +35,10 @@ class AliasAwareModel:
         return {
             "parsed": StructureAnnotationResponse(
                 paragraphs=[
-                    {
-                        "alias": item["alias"],
-                        "heading_level": (1 if item["text"].startswith(("عنوان", "•")) else None),
-                    }
+                    AnnotatedParagraph(
+                        alias=item["alias"],
+                        heading_level=(1 if item["text"].startswith(("عنوان", "•")) else None),
+                    )
                     for item in paragraphs
                 ]
             )
@@ -67,7 +69,9 @@ async def test_structure_annotation_uses_local_aliases_and_keeps_citation_ids_fi
     paragraphs[2] = _paragraph(2, kind=ParagraphKind.LIST_ITEM, text="• مورد مستقل")
     model = AliasAwareModel()
 
-    labels = await OpenRouterStructureAnnotator(model).annotate(paragraphs)  # type: ignore[arg-type]
+    labels = await OpenRouterStructureAnnotator(model).annotate(
+        cast(Sequence[SourceParagraph], paragraphs)
+    )
 
     assert model.batches == [
         [f"P{index}" for index in range(1, 33)],
@@ -86,6 +90,6 @@ def test_heuristic_heading_levels_preserve_detected_hierarchy() -> None:
     nested = _paragraph(1, kind=ParagraphKind.HEADING, text="1.2. بازیابی")
     body = _paragraph(2, kind=ParagraphKind.PROSE, text="متن توضیحی")
 
-    labels = heuristic_heading_levels([top, nested, body])  # type: ignore[arg-type]
+    labels = heuristic_heading_levels(cast(Sequence[SourceParagraph], [top, nested, body]))
 
     assert labels == {top.id: 1, nested.id: 2, body.id: None}

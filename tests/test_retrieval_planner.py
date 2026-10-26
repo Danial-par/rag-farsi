@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from langchain_core.messages import BaseMessage
@@ -13,7 +13,7 @@ from rag_assistant.retrieval.planner import (
 
 
 class Candidate:
-    def __init__(self, *, chunk_id, version_id, section_id) -> None:
+    def __init__(self, *, chunk_id: UUID, version_id: UUID, section_id: UUID) -> None:
         self.chunk_id = chunk_id
         self.document_version_id = version_id
         self.normalized_text = "متن مستند"
@@ -48,7 +48,7 @@ async def test_planner_reranks_only_supplied_chunks_and_maps_section_to_version(
 
     plan = await OpenRouterRetrievalPlanner(model).plan(
         question="همه اجزای اصلی کدام‌اند؟",
-        candidates=[first, second],  # type: ignore[list-item]
+        candidates=[first, second],
         top_k=2,
     )
 
@@ -65,7 +65,7 @@ async def test_planner_retries_unknown_alias_once_then_fails_closed() -> None:
     with pytest.raises(ValueError, match="unknown or duplicate aliases"):
         await OpenRouterRetrievalPlanner(model).plan(
             question="پرسش",
-            candidates=[candidate],  # type: ignore[list-item]
+            candidates=[candidate],
             top_k=1,
         )
 
