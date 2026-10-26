@@ -44,9 +44,9 @@ def test_sample_evaluation_units_resolve_to_extracted_citation_paragraphs() -> N
         f"{item.page_number}:{item.paragraph_number}" for item in extraction.paragraphs
     }
 
-    assert len(dataset.cases) == 30
+    assert len(dataset.cases) == 31
     assert Counter(case.category for case in dataset.cases) == {
-        "persian_supported": 12,
+        "persian_supported": 13,
         "english_supported": 5,
         "partial": 4,
         "unsupported": 6,
@@ -63,6 +63,7 @@ def test_evaluation_scores_retrieval_citations_outcomes_and_abstention() -> None
         EvaluationObservation(
             case_id=case.case_id,
             retrieved_units=case.expected_units,
+            retrieved_unit_groups=(case.expected_units,),
             cited_units=case.expected_units if case.expected_outcome != "abstained" else (),
             persisted_units=case.expected_units,
             outcome=case.expected_outcome,
@@ -73,6 +74,7 @@ def test_evaluation_scores_retrieval_citations_outcomes_and_abstention() -> None
     report = score_evaluation(dataset, observations)
 
     assert report.retrieval_recall_at_k == 1.0
+    assert report.context_source_recall == 1.0
     assert report.citation_validity == 1.0
     assert report.citation_recall == 1.0
     assert report.outcome_accuracy == 1.0
@@ -97,7 +99,8 @@ def test_evaluation_reports_advisory_retrieval_regression_and_invalid_citations(
     report = score_evaluation(dataset, observations)
 
     assert report.retrieval_recall_at_k == 0.0
-    assert report.citation_validity == pytest.approx(7 / 30)
+    assert report.context_source_recall == 0.0
+    assert report.citation_validity == pytest.approx(7 / 31)
     assert report.outcome_accuracy == 0.0
     assert report.abstention_accuracy < 1.0
     assert report.warnings
@@ -119,10 +122,10 @@ def test_metric_percentiles_latency_and_token_totals() -> None:
     )
     report = score_evaluation(dataset, observations)
 
-    assert report.average_latency_ms == 145
+    assert report.average_latency_ms == 150
     assert report.p50_latency_ms == 150
-    assert report.p95_latency_ms == 280
-    assert report.token_usage_totals == {"input_tokens": 60, "total_tokens": 90}
+    assert report.p95_latency_ms == 290
+    assert report.token_usage_totals == {"input_tokens": 62, "total_tokens": 93}
 
 
 def test_recall_at_five_counts_ranked_chunks_not_flattened_paragraphs() -> None:
@@ -255,7 +258,12 @@ async def test_live_runner_uses_graph_retrieval_and_persists_snapshot(
         join_transaction_mode="create_savepoint",
     )
     local_settings = settings.model_copy(
-        update={"app_env": "local", "openrouter_api_key": "mock-key"}
+        update={
+            "app_env": "local",
+            "openrouter_api_key": "mock-key",
+            "structure_annotation_enabled": False,
+            "retrieval_planner_enabled": False,
+        }
     )
     sample = await seed_sample_document(
         settings=local_settings,
@@ -297,7 +305,7 @@ async def test_live_runner_uses_graph_retrieval_and_persists_snapshot(
 
     assert report.cases_scored == 1
     assert report.citation_validity == 1.0
-    report_file = tmp_path / "reports" / "sample-doc-v2.json"
+    report_file = tmp_path / "reports" / "sample-doc-v3.json"
     observations = json.loads(report_file.read_text(encoding="utf-8"))["observations"]
     assert observations[0]["retrieved_units"]
     assert observations[0]["cited_units"] == observations[0]["persisted_units"]
@@ -316,7 +324,7 @@ async def test_live_runner_uses_graph_retrieval_and_persists_snapshot(
     assert resumed.cases_scored == 1
     assert generator.calls == 1
 
-    fresh_dataset = dataset.model_copy(update={"dataset_id": "sample-doc-v2-fresh-run"})
+    fresh_dataset = dataset.model_copy(update={"dataset_id": "sample-doc-v3-fresh-run"})
     fresh_run = await run_live_evaluation(
         settings=local_settings,
         dataset=fresh_dataset,

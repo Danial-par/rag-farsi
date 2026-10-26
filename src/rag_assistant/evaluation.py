@@ -78,6 +78,7 @@ class EvaluationReport:
     """Aggregate deterministic metrics; warnings are advisory by default."""
 
     retrieval_recall_at_k: float
+    context_source_recall: float
     citation_validity: float
     citation_recall: float
     outcome_accuracy: float
@@ -126,6 +127,7 @@ def score_evaluation(
         raise ValueError("Evaluation metrics require completed assistant executions")
 
     recall_scores: list[float] = []
+    context_recall_scores: list[float] = []
     citation_recall_scores: list[float] = []
     citation_valid = outcome_correct = abstention_correct = partial_correct = 0
     partial_count = 0
@@ -141,6 +143,9 @@ def score_evaluation(
                 else set(result.retrieved_units[:k])
             )
             recall_scores.append(len(expected & top_k_units) / len(expected))
+            context_recall_scores.append(
+                len(expected & set(result.retrieved_units)) / len(expected)
+            )
             citation_recall_scores.append(len(expected & set(result.cited_units)) / len(expected))
         cited = set(result.cited_units)
         if cited.issubset(set(result.persisted_units)) and cited.issubset(
@@ -161,11 +166,13 @@ def score_evaluation(
 
     denominator = len(cases)
     recall = _mean(recall_scores)
+    context_recall = _mean(context_recall_scores)
     citation_recall = _mean(citation_recall_scores)
     latencies.sort()
     warnings: list[str] = []
     targets = (
         (recall, recall_threshold, f"retrieval Recall@{k}"),
+        (context_recall, recall_threshold, "retrieval context source recall"),
         (citation_valid / denominator, 1.0, "citation validity"),
         (citation_recall, 0.80, "citation recall"),
         (outcome_correct / denominator, 0.80, "outcome accuracy"),
@@ -178,6 +185,7 @@ def score_evaluation(
     )
     return EvaluationReport(
         retrieval_recall_at_k=recall,
+        context_source_recall=context_recall,
         citation_validity=citation_valid / denominator,
         citation_recall=citation_recall,
         outcome_accuracy=outcome_correct / denominator,
@@ -208,6 +216,7 @@ def report_json(report: EvaluationReport) -> str:
         {
             "cases_scored": report.cases_scored,
             "retrieval_recall_at_k": report.retrieval_recall_at_k,
+            "context_source_recall": report.context_source_recall,
             "citation_validity": report.citation_validity,
             "citation_recall": report.citation_recall,
             "outcome_accuracy": report.outcome_accuracy,
