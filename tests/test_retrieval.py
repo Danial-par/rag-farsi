@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select
@@ -31,12 +31,14 @@ from rag_assistant.db.repositories import (
 from rag_assistant.retrieval import (
     IncompatibleEmbeddingConfigurationError,
     InvalidRetrievalQueryError,
+    RetrievalDecision,
     RetrievalIntegrityError,
     RetrievalRequest,
     RetrievalScopeError,
     RetrievalService,
+    SectionSelection,
 )
-from rag_assistant.retrieval.planner import RetrievalPlan
+from rag_assistant.retrieval.models import RankedCandidates, SectionOutlineItem
 
 
 def _vector(first: float, second: float = 0.0) -> list[float]:
@@ -60,30 +62,71 @@ class QueryEmbeddingClient:
 
 
 class FixedRetrievalPlanner:
-    def __init__(
+    def __init__(self, section_id: UUID) -> None:
+        self.section_id = section_id
+
+    async def assess(
         self,
         *,
-        chunk_ids: tuple[UUID, ...],
-        section_selections: tuple[tuple[UUID, UUID], ...],
-    ) -> None:
-        self.plan_result = RetrievalPlan(
-            chunk_ids=chunk_ids,
-            section_selections=section_selections,
+        question: str,
+        ranked: RankedCandidates,
+        section_outline: Sequence[SectionOutlineItem],
+        section_outline_truncated: bool = False,
+    ) -> RetrievalDecision:
+        del question, ranked, section_outline_truncated
+        item = next(section for section in section_outline if section.section_id == self.section_id)
+        return RetrievalDecision(
+            action="expand_section",
+            sections=(
+                SectionSelection(
+                    document_version_id=item.document_version_id,
+                    section_id=item.section_id,
+                    parent_section_id=item.parent_section_id,
+                    heading_path=item.heading_path,
+                ),
+            ),
         )
-
-    async def plan(
-        self, *, question: str, candidates: Sequence[object], top_k: int
-    ) -> RetrievalPlan:
-        del question, candidates, top_k
-        return self.plan_result
 
 
 class FailedRetrievalPlanner:
-    async def plan(
-        self, *, question: str, candidates: Sequence[object], top_k: int
-    ) -> RetrievalPlan:
-        del question, candidates, top_k
+    async def assess(
+        self,
+        *,
+        question: str,
+        ranked: RankedCandidates,
+        section_outline: Sequence[SectionOutlineItem],
+        section_outline_truncated: bool = False,
+    ) -> RetrievalDecision:
+        del question, ranked, section_outline, section_outline_truncated
         raise ValueError("invalid structured output")
+
+
+class SiblingRetrievalPlanner:
+    def __init__(self, section_ids: tuple[UUID, ...]) -> None:
+        self.section_ids = section_ids
+
+    async def assess(
+        self,
+        *,
+        question: str,
+        ranked: RankedCandidates,
+        section_outline: Sequence[SectionOutlineItem],
+        section_outline_truncated: bool = False,
+    ) -> RetrievalDecision:
+        del question, ranked, section_outline_truncated
+        selected = [item for item in section_outline if item.section_id in self.section_ids]
+        return RetrievalDecision(
+            action="fetch_siblings",
+            sections=tuple(
+                SectionSelection(
+                    document_version_id=item.document_version_id,
+                    section_id=item.section_id,
+                    parent_section_id=item.parent_section_id,
+                    heading_path=item.heading_path,
+                )
+                for item in selected
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,10 +275,7 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
         )
     )
     assert len(chunk_ids) == 4
-    planner = FixedRetrievalPlanner(
-        chunk_ids=(chunk_ids[0],),
-        section_selections=((indexed.version.id, parent_id),),
-    )
+    planner = FixedRetrievalPlanner(section_id=parent_id)
     await db_session.flush()
     async with AsyncSession(
         bind=db_session.bind,
@@ -263,6 +303,73 @@ async def test_retrieval_expands_a_selected_parent_inside_authorized_scope(
     assert {
         source.source_paragraph_id for source in result.context_sections[0].citation_sources
     } == set(indexed.paragraph_ids[1:])
+
+
+async def test_retrieval_fetches_only_planner_selected_sibling_sections(
+    db_session: AsyncSession,
+    settings: Settings,
+) -> None:
+    user = await _user(db_session, "sibling-expansion@example.com")
+    parent_id, first_id, second_id = uuid4(), uuid4(), uuid4()
+    first_path = [
+        {"id": str(parent_id), "title": "اجزای اصلی RAG", "level": 1},
+        {"id": str(first_id), "title": "بارگذاری اسناد", "level": 2},
+    ]
+    second_path = [
+        {"id": str(parent_id), "title": "اجزای اصلی RAG", "level": 1},
+        {"id": str(second_id), "title": "تقسیم‌بندی متن", "level": 2},
+    ]
+    indexed = await _indexed_document(
+        db_session,
+        key="documents/sibling-sections.pdf",
+        title="راهنمای RAG",
+        owner_id=user.id,
+        vectors=[_vector(1.0), _vector(0.8, 0.6), _vector(0.6, 0.8), _vector(0.4, 0.9)],
+        chunk_metadata=[
+            {"section_path": first_path},
+            {"section_path": first_path},
+            {"section_path": second_path},
+            {"section_path": second_path},
+        ],
+    )
+    conversation = await ConversationRepository(db_session).create(owner_id=user.id)
+    await ConversationRepository(db_session).add_document(
+        owner_id=user.id,
+        conversation_id=conversation.id,
+        document_id=indexed.document.id,
+    )
+    await db_session.flush()
+
+    async with AsyncSession(
+        bind=db_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    ) as retrieval_session:
+        result = await RetrievalService(
+            session=retrieval_session,
+            embedding_client=QueryEmbeddingClient(),
+            settings=settings,
+            planner=SiblingRetrievalPlanner((first_id, second_id)),
+        ).retrieve(
+            RetrievalRequest(
+                user_id=user.id,
+                conversation_id=conversation.id,
+                question="درباره دو زیربخش توضیح بده",
+                top_k=1,
+            )
+        )
+
+    assert len(result.evidence) == 1
+    assert [section.heading_path for section in result.context_sections] == [
+        ("اجزای اصلی RAG", "بارگذاری اسناد"),
+        ("اجزای اصلی RAG", "تقسیم‌بندی متن"),
+    ]
+    assert {
+        source.source_paragraph_id for source in result.context_sections[0].citation_sources
+    } == set(indexed.paragraph_ids[:2])
+    assert {
+        source.source_paragraph_id for source in result.context_sections[1].citation_sources
+    } == set(indexed.paragraph_ids[2:])
 
 
 async def test_retrieval_planner_failure_still_expands_top_candidate_parent(

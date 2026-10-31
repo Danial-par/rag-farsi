@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     retrieval_candidate_count: int = Field(default=30, ge=6, le=100)
     retrieval_max_expanded_sections: int = Field(default=2, ge=0, le=8)
     retrieval_section_max_characters: int = Field(default=24_000, ge=2_000, le=100_000)
+    retrieval_outline_max_sections: int = Field(default=200, ge=1, le=1000)
+    reranker_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8081")
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_api_key: SecretStr | None = None
+    reranker_timeout_seconds: float = Field(default=60, gt=0, le=600)
     langfuse_public_key: str | None = None
     langfuse_secret_key: SecretStr | None = None
     langfuse_base_url: AnyHttpUrl = AnyHttpUrl("https://cloud.langfuse.com")
@@ -89,6 +94,11 @@ class Settings(BaseSettings):
     @field_validator("s3_endpoint_url", mode="before")
     @classmethod
     def blank_optional_s3_endpoint_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator("reranker_api_key", mode="before")
+    @classmethod
+    def blank_optional_reranker_key_is_unset(cls, value: object) -> object:
         return None if value == "" else value
 
     @model_validator(mode="after")
@@ -133,6 +143,13 @@ class Settings(BaseSettings):
                 raise ValueError("ALLOWED_ORIGINS entries must be exact HTTP(S) origins")
             if self.app_env == "production" and parsed.scheme != "https":
                 raise ValueError("Production ALLOWED_ORIGINS must use HTTPS")
+        reranker_host = urlsplit(str(self.reranker_base_url)).hostname
+        if self.app_env == "production" and reranker_host in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
+            raise ValueError("RERANKER_BASE_URL must point to the production reranker service")
         for proxy in self.trusted_proxy_hosts:
             try:
                 ip_network(proxy, strict=False)

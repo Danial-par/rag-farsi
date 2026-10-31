@@ -21,6 +21,7 @@ from rag_assistant.db.models import (
     SourceParagraph,
 )
 from rag_assistant.retrieval.errors import RetrievalIntegrityError
+from rag_assistant.retrieval.models import SectionOutlineItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class RetrievalScope:
     conversation_exists: bool
     active_document_count: int
     incompatible_document_count: int
+    active_version_ids: frozenset[UUID]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +123,14 @@ class RetrievalRepository:
             func.count(authorized.c.document_id)
             .filter(incompatible)
             .label("incompatible_document_count"),
+            func.array_agg(authorized.c.document_version_id).label("active_version_ids"),
         ).select_from(authorized)
         row = (await self._session.execute(statement)).one()
         return RetrievalScope(
             conversation_exists=bool(row.conversation_exists),
             active_document_count=int(row.active_document_count),
             incompatible_document_count=int(row.incompatible_document_count),
+            active_version_ids=frozenset(row.active_version_ids or ()),
         )
 
     async def retrieve(
@@ -384,6 +388,96 @@ class RetrievalRepository:
                 )
             )
         return expanded
+
+    async def section_outline(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        roots: Sequence[tuple[UUID, UUID]],
+        max_sections: int,
+    ) -> tuple[tuple[SectionOutlineItem, ...], bool]:
+        """Load bounded heading metadata under candidate roots within authorized scope."""
+        if not roots or max_sections <= 0:
+            return (), False
+        authorized = self._authorized_active_documents(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        section_filters = [
+            and_(
+                authorized.c.document_version_id == version_id,
+                Chunk.document_version_id == version_id,
+                Chunk.chunk_metadata.contains({"section_path": [{"id": str(section_id)}]}),
+            )
+            for version_id, section_id in roots
+        ]
+        path_expression = Chunk.chunk_metadata["section_path"]
+        statement = (
+            select(
+                authorized.c.document_version_id,
+                authorized.c.document_title,
+                path_expression.label("section_path"),
+                func.min(Chunk.ordinal).label("first_ordinal"),
+            )
+            .select_from(authorized)
+            .join(
+                Chunk,
+                and_(
+                    Chunk.document_version_id == authorized.c.document_version_id,
+                    Chunk.embedding_model == authorized.c.embedding_model,
+                    Chunk.embedding_dimensions == authorized.c.embedding_dimensions,
+                ),
+            )
+            .where(or_(*section_filters))
+            .group_by(authorized.c.document_version_id, path_expression)
+            .order_by(authorized.c.document_version_id, func.min(Chunk.ordinal))
+            .limit(max_sections * 2 + 1)
+        )
+        rows = (await self._session.execute(statement)).mappings().all()
+        outline: dict[tuple[UUID, UUID], SectionOutlineItem] = {}
+        truncated = False
+        for row in rows:
+            path = row["section_path"]
+            if not isinstance(path, list):
+                continue
+            heading_path: list[str] = []
+            parent_id: UUID | None = None
+            version_id = row["document_version_id"]
+            for index, item in enumerate(path):
+                if not isinstance(item, dict):
+                    continue
+                raw_id = item.get("id")
+                title = item.get("title")
+                if not isinstance(raw_id, str) or not isinstance(title, str) or not title.strip():
+                    continue
+                try:
+                    section_id = UUID(raw_id)
+                except ValueError:
+                    continue
+                key = (version_id, section_id)
+                heading_path.append(title[:500])
+                if key not in outline:
+                    raw_level = item.get("level")
+                    level = raw_level if isinstance(raw_level, int) and raw_level > 0 else index + 1
+                    outline[key] = SectionOutlineItem(
+                        document_version_id=version_id,
+                        section_id=section_id,
+                        parent_section_id=parent_id,
+                        document_title=row["document_title"][:500],
+                        title=title[:500],
+                        level=min(level, 32),
+                        heading_path=tuple(heading_path),
+                    )
+                    if len(outline) > max_sections:
+                        truncated = True
+                        break
+                parent_id = section_id
+            if truncated:
+                break
+        if truncated:
+            outline.pop(next(reversed(outline)), None)
+        return tuple(outline.values()), truncated
 
     @staticmethod
     def _authorized_active_documents(

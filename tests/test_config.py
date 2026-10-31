@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
@@ -119,7 +121,26 @@ def test_production_requires_model_credentials_and_allowed_origins() -> None:
             s3_bucket="private-test-bucket",
             openrouter_api_key="test-openrouter-key",
             allowed_origins=["http://app.example.test"],
+            reranker_base_url="https://reranker.example.test",
         )
+
+
+def test_production_requires_a_non_loopback_reranker_endpoint() -> None:
+    common: dict[str, Any] = {
+        "app_env": "production",
+        "database_url": "postgresql+psycopg://user:password@localhost/database",
+        "jwt_secret": JWT_SECRET,
+        "object_store_backend": "s3",
+        "s3_bucket": "private-test-bucket",
+        "openrouter_api_key": "test-openrouter-key",
+        "allowed_origins": ["https://app.example.test"],
+    }
+
+    with pytest.raises(ValidationError, match="RERANKER_BASE_URL"):
+        Settings(**common)
+
+    settings = Settings(**common, reranker_base_url="https://reranker.example.test")
+    assert str(settings.reranker_base_url).startswith("https://reranker.example.test")
 
 
 def test_s3_static_credentials_must_be_configured_as_a_pair() -> None:

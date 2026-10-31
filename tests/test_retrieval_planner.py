@@ -1,36 +1,37 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from langchain_core.messages import BaseMessage
 from pydantic import ValidationError
 
+from rag_assistant.db.models import ParagraphKind
+from rag_assistant.retrieval import (
+    CitationSource,
+    EvidenceChunk,
+    RankedCandidate,
+    RankedCandidates,
+    SectionOutlineItem,
+)
+from rag_assistant.retrieval.models import RetrievalDecision
 from rag_assistant.retrieval.planner import (
-    OpenRouterRetrievalPlanner,
-    RankedRetrieval,
+    ContextAssessment,
+    OpenRouterContextPlanner,
     RetrievalPlannerOutputError,
-    _ranked_retrieval_schema,
+    _context_assessment_schema,
 )
 
 
-class Candidate:
-    def __init__(self, *, chunk_id: UUID, version_id: UUID, section_id: UUID) -> None:
-        self.chunk_id = chunk_id
-        self.document_version_id = version_id
-        self.normalized_text = "متن مستند"
-        self.section_path = ({"id": str(section_id), "title": "بخش اصلی", "level": 1},)
-
-
 class FakePlannerModel:
-    def __init__(self, parsed: RankedRetrieval) -> None:
+    def __init__(self, parsed: ContextAssessment) -> None:
         self.parsed = parsed
         self.calls = 0
-        self.schema: type[RankedRetrieval] | None = None
+        self.schema: type[ContextAssessment] | None = None
 
     def with_structured_output(
-        self, schema: type[RankedRetrieval], *, include_raw: bool
+        self, schema: type[ContextAssessment], *, include_raw: bool
     ) -> FakePlannerModel:
         assert include_raw is True
         self.schema = schema
@@ -46,50 +47,133 @@ class FakePlannerModel:
         return {"parsed": parsed}
 
 
-@pytest.mark.asyncio
-async def test_planner_reranks_only_supplied_chunks_and_maps_section_to_version() -> None:
+def _ranked() -> RankedCandidates:
+    chunk_id = uuid4()
+    doc_id = uuid4()
     version_id = uuid4()
-    section_id = uuid4()
-    first = Candidate(chunk_id=uuid4(), version_id=version_id, section_id=section_id)
-    second = Candidate(chunk_id=uuid4(), version_id=version_id, section_id=section_id)
-    model = FakePlannerModel(
-        RankedRetrieval(chunk_aliases=["E2", "E1"], expand_section_aliases=["S1"])
+    source_id = uuid4()
+    evidence = EvidenceChunk(
+        chunk_id=chunk_id,
+        document_id=doc_id,
+        document_version_id=version_id,
+        document_title="راهنما",
+        chunk_ordinal=1,
+        normalized_text="متن مرتبط",
+        token_count=4,
+        cosine_similarity=0.9,
+        citation_sources=(
+            CitationSource(
+                source_paragraph_id=source_id,
+                document_id=doc_id,
+                document_version_id=version_id,
+                document_title="راهنما",
+                page_number=1,
+                paragraph_number=1,
+                kind=ParagraphKind.PROSE,
+                original_text="متن مرتبط",
+                normalized_text="متن مرتبط",
+            ),
+        ),
+    )
+    return RankedCandidates(candidates=(RankedCandidate(evidence=evidence, score=0.8),))
+
+
+def _outline() -> tuple[SectionOutlineItem, ...]:
+    version_id = uuid4()
+    parent_id, first_id, second_id = uuid4(), uuid4(), uuid4()
+    return (
+        SectionOutlineItem(
+            document_version_id=version_id,
+            section_id=parent_id,
+            document_title="RAG Handbook",
+            title="اجزای RAG",
+            level=1,
+            heading_path=("اجزای RAG",),
+        ),
+        SectionOutlineItem(
+            document_version_id=version_id,
+            section_id=first_id,
+            parent_section_id=parent_id,
+            document_title="RAG Handbook",
+            title="بارگذاری اسناد",
+            level=2,
+            heading_path=("اجزای RAG", "بارگذاری اسناد"),
+        ),
+        SectionOutlineItem(
+            document_version_id=version_id,
+            section_id=second_id,
+            parent_section_id=parent_id,
+            document_title="RAG Handbook",
+            title="تقسیم‌بندی متن",
+            level=2,
+            heading_path=("اجزای RAG", "تقسیم‌بندی متن"),
+        ),
     )
 
-    plan = await OpenRouterRetrievalPlanner(model).plan(
+
+@pytest.mark.asyncio
+async def test_context_planner_maps_a_parent_expansion_alias_to_persisted_ids() -> None:
+    outline = _outline()
+    model = FakePlannerModel(ContextAssessment(action="expand_section", section_aliases=["S1"]))
+    planner = OpenRouterContextPlanner(model)
+
+    decision = await planner.assess(
         question="همه اجزای اصلی کدام‌اند؟",
-        candidates=[first, second],
-        top_k=2,
+        ranked=_ranked(),
+        section_outline=outline,
     )
 
-    assert plan.chunk_ids == (second.chunk_id, first.chunk_id)
-    assert plan.section_selections == ((version_id, section_id),)
+    assert decision == RetrievalDecision(
+        action="expand_section",
+        sections=(
+            {
+                "document_version_id": outline[0].document_version_id,
+                "section_id": outline[0].section_id,
+                "parent_section_id": None,
+                "heading_path": ("اجزای RAG",),
+            },
+        ),
+    )
     assert model.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_planner_retries_unknown_alias_once_then_fails_closed() -> None:
-    candidate = Candidate(chunk_id=uuid4(), version_id=uuid4(), section_id=uuid4())
-    model = FakePlannerModel(RankedRetrieval(chunk_aliases=["E9"], expand_section_aliases=["S9"]))
+async def test_context_planner_accepts_only_available_sibling_sections() -> None:
+    outline = _outline()
+    model = FakePlannerModel(
+        ContextAssessment(action="fetch_siblings", section_aliases=["S2", "S3"])
+    )
 
+    decision = await OpenRouterContextPlanner(model).assess(
+        question="دو زیربخش مرتبط را توضیح بده",
+        ranked=_ranked(),
+        section_outline=outline,
+    )
+
+    assert decision.action == "fetch_siblings"
+    assert tuple(item.section_id for item in decision.sections) == (
+        outline[1].section_id,
+        outline[2].section_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_planner_rejects_unknown_aliases_after_one_retry() -> None:
+    model = FakePlannerModel(ContextAssessment(action="expand_section", section_aliases=["S99"]))
     with pytest.raises(RetrievalPlannerOutputError, match="invalid structured output") as error:
-        await OpenRouterRetrievalPlanner(model).plan(
+        await OpenRouterContextPlanner(model).assess(
             question="پرسش",
-            candidates=[candidate],
-            top_k=1,
+            ranked=_ranked(),
+            section_outline=_outline(),
         )
 
     assert model.calls == 2
-    assert error.value.failure_reason in {
-        "unknown_chunk_alias",
-        "unknown_section_alias",
-    }
+    assert error.value.failure_reason == "unknown_section_alias"
 
 
-def test_planner_schema_enforces_request_specific_candidate_limits() -> None:
-    schema = _ranked_retrieval_schema(top_k=2, max_sections=1)
+def test_context_planner_schema_enforces_section_count() -> None:
+    schema = _context_assessment_schema(max_sections=2)
 
-    assert schema.model_json_schema()["properties"]["chunk_aliases"]["maxItems"] == 2
-    assert schema.model_json_schema()["properties"]["expand_section_aliases"]["maxItems"] == 1
+    assert schema.model_json_schema()["properties"]["section_aliases"]["maxItems"] == 2
     with pytest.raises(ValidationError):
-        schema(chunk_aliases=["E1", "E2", "E3"], expand_section_aliases=[])
+        schema(action="fetch_siblings", section_aliases=["S1", "S2", "S3"])
