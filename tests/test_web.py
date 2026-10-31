@@ -33,7 +33,7 @@ def test_browser_client_obeys_security_and_chat_contracts() -> None:
     script = (WEB_ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     assert 'credentials: "same-origin"' in script
-    assert 'headers.set("X-CSRF-Token", token)' in script
+    assert "rag_csrf_token" not in script
     assert '"Idempotency-Key": idempotencyKey' in script
     assert "[...(page.items || [])].reverse()" in script
     assert "node.textContent" in script

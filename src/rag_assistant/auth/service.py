@@ -11,16 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rag_assistant.core.config import Settings
 from rag_assistant.core.security import InvalidTokenError, PasswordManager, TokenManager
 from rag_assistant.db.base import utc_now
-from rag_assistant.db.models import AuthSession, User
+from rag_assistant.db.models import User
 from rag_assistant.db.repositories import AuthSessionRepository, UserRepository
 
 
 class AuthenticationError(ValueError):
     """Raised for authentication failures safe to expose as a generic 401."""
-
-
-class CsrfValidationError(ValueError):
-    """Raised when an unsafe cookie-authenticated request lacks CSRF proof."""
 
 
 class RefreshStatus(StrEnum):
@@ -34,7 +30,6 @@ class AuthResult:
     user: User
     access_token: str
     refresh_token: str
-    csrf_token: str
     session_expires_at: datetime
 
 
@@ -43,7 +38,6 @@ class RefreshResult:
     status: RefreshStatus
     access_token: str | None = None
     refresh_token: str | None = None
-    csrf_token: str | None = None
     session_expires_at: datetime | None = None
 
 
@@ -86,14 +80,7 @@ class AuthService:
             user.password_hash = self._passwords.hash(password)
         return await self._create_session(user=user, client_metadata=client_metadata)
 
-    async def authenticate_access(
-        self,
-        raw_token: str,
-        *,
-        require_csrf: bool = False,
-        csrf_cookie: str | None = None,
-        csrf_header: str | None = None,
-    ) -> User:
+    async def authenticate_access(self, raw_token: str) -> User:
         try:
             claims = self._tokens.decode(raw_token, expected_type="access")
         except InvalidTokenError as exc:
@@ -105,17 +92,9 @@ class AuthService:
         user = await self._users.get_by_id(claims.user_id)
         if user is None or not user.is_active:
             raise AuthenticationError("Not authenticated")
-        if require_csrf:
-            self._validate_csrf(auth_session, csrf_cookie, csrf_header)
         return user
 
-    async def refresh(
-        self,
-        raw_token: str,
-        *,
-        csrf_cookie: str | None,
-        csrf_header: str | None,
-    ) -> RefreshResult:
+    async def refresh(self, raw_token: str) -> RefreshResult:
         try:
             claims = self._tokens.decode(raw_token, expected_type="refresh")
         except InvalidTokenError as exc:
@@ -135,8 +114,6 @@ class AuthService:
             or auth_session.expires_at <= now
         ):
             raise AuthenticationError("Invalid authentication session")
-        self._validate_csrf(auth_session, csrf_cookie, csrf_header)
-
         presented_hash = self._tokens.hash_identifier(claims.token_id)
         if hmac.compare_digest(presented_hash, auth_session.refresh_token_hash):
             new_token_id = self._tokens.new_token_id()
@@ -161,7 +138,6 @@ class AuthService:
                     issued_at=now,
                     expires_at=auth_session.expires_at,
                 ),
-                csrf_token=csrf_cookie,
                 session_expires_at=auth_session.expires_at,
             )
 
@@ -180,13 +156,7 @@ class AuthService:
         await self._session.flush()
         return RefreshResult(status=RefreshStatus.REUSE_DETECTED)
 
-    async def logout(
-        self,
-        raw_token: str,
-        *,
-        csrf_cookie: str | None,
-        csrf_header: str | None,
-    ) -> None:
+    async def logout(self, raw_token: str) -> None:
         try:
             claims = self._tokens.decode(raw_token, expected_type="refresh")
         except InvalidTokenError as exc:
@@ -198,7 +168,6 @@ class AuthService:
             or auth_session.revoked_at is not None
         ):
             raise AuthenticationError("Invalid authentication session")
-        self._validate_csrf(auth_session, csrf_cookie, csrf_header)
         auth_session.revoked_at = utc_now()
         auth_session.revocation_reason = "logout"
         await self._session.flush()
@@ -207,12 +176,10 @@ class AuthService:
         now = utc_now()
         expires_at = now + timedelta(days=self._settings.refresh_token_ttl_days)
         refresh_token_id = self._tokens.new_token_id()
-        csrf_token = self._tokens.new_csrf_token()
         auth_session = await self._sessions.create(
             user_id=user.id,
             expires_at=expires_at,
             refresh_token_hash=self._tokens.hash_identifier(refresh_token_id),
-            csrf_token_hash=self._tokens.hash_identifier(csrf_token),
             client_metadata=client_metadata,
         )
         return AuthResult(
@@ -230,21 +197,5 @@ class AuthService:
                 issued_at=now,
                 expires_at=expires_at,
             ),
-            csrf_token=csrf_token,
             session_expires_at=expires_at,
         )
-
-    def _validate_csrf(
-        self,
-        auth_session: AuthSession,
-        csrf_cookie: str | None,
-        csrf_header: str | None,
-    ) -> None:
-        if csrf_cookie is None or csrf_header is None:
-            raise CsrfValidationError("CSRF validation failed")
-        if not hmac.compare_digest(csrf_cookie, csrf_header):
-            raise CsrfValidationError("CSRF validation failed")
-        if not hmac.compare_digest(
-            self._tokens.hash_identifier(csrf_cookie), auth_session.csrf_token_hash
-        ):
-            raise CsrfValidationError("CSRF validation failed")

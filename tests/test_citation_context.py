@@ -5,7 +5,6 @@ import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 
-from rag_assistant.api.auth import CSRF_COOKIE_NAME
 from rag_assistant.db.base import utc_now
 from rag_assistant.db.models import (
     AnswerOutcome,
@@ -168,9 +167,7 @@ async def test_context_denies_uncited_sources_wrong_messages_and_foreign_convers
         citation.url.replace(str(citation.conversation_id), str(uuid4())),
     ):
         assert (await database_client.get(url)).status_code == 404
-    await database_client.post(
-        "/api/v1/auth/logout", headers={"X-CSRF-Token": database_client.cookies[CSRF_COOKIE_NAME]}
-    )
+    await database_client.post("/api/v1/auth/logout")
     await database_client.post(
         "/api/v1/auth/register",
         json={"email": "another-reader@example.com", "password": "correct horse battery staple"},

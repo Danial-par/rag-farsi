@@ -4,24 +4,13 @@
   const API = "/api/v1";
   const el = (id) => document.getElementById(id);
   const state = { user: null, conversations: [], documents: [], current: null, selected: new Set(), cursor: null, retry: null, polling: null, authMode: "login", sending: false, uploading: false, renaming: false };
-  const unsafeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-
-  function csrfToken() {
-    const entry = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("rag_csrf_token="));
-    return entry ? decodeURIComponent(entry.slice("rag_csrf_token=".length)) : "";
-  }
-
   async function api(path, options = {}, retried = false) {
     const method = (options.method || "GET").toUpperCase();
     const headers = new Headers(options.headers || {});
-    if (unsafeMethods.has(method)) {
-      const token = csrfToken();
-      if (token) headers.set("X-CSRF-Token", token);
-    }
     const response = await fetch(`${API}${path}`, { ...options, method, headers, credentials: "same-origin" });
     if (response.status === 401 && !retried && !path.startsWith("/auth/")) {
       try {
-        const refreshed = await fetch(`${API}/auth/refresh`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } });
+        const refreshed = await fetch(`${API}/auth/refresh`, { method: "POST", credentials: "same-origin" });
         if (refreshed.ok) return api(path, options, true);
       } catch (_) { /* Expired session is handled below. */ }
       showAuth();

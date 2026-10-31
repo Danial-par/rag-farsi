@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from rag_assistant.api.auth import (
     ACCESS_COOKIE_NAME,
-    CSRF_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
     REFRESH_COOKIE_PATH,
 )
@@ -31,10 +30,6 @@ async def _register(client: AsyncClient, email: str = "User@Example.com") -> dic
     )
     assert response.status_code == 201
     return cast(dict[str, str], response.json())
-
-
-def _csrf_header(client: AsyncClient) -> dict[str, str]:
-    return {"X-CSRF-Token": client.cookies[CSRF_COOKIE_NAME]}
 
 
 def _replace_cookie(client: AsyncClient, name: str, value: str, *, path: str) -> None:
@@ -113,19 +108,12 @@ async def test_access_cookie_authenticates_me_and_rejects_invalid_tokens(
     assert "malformed" not in malformed.text
 
 
-async def test_refresh_rotates_tokens_and_requires_csrf(database_client: AsyncClient) -> None:
+async def test_refresh_rotates_tokens_without_csrf_header(database_client: AsyncClient) -> None:
     await _register(database_client, "refresh@example.com")
     old_refresh = database_client.cookies[REFRESH_COOKIE_NAME]
 
-    missing_csrf = await database_client.post("/api/v1/auth/refresh")
-    invalid_csrf = await database_client.post(
-        "/api/v1/auth/refresh", headers={"X-CSRF-Token": "wrong"}
-    )
-    rotated = await database_client.post(
-        "/api/v1/auth/refresh", headers=_csrf_header(database_client)
-    )
+    rotated = await database_client.post("/api/v1/auth/refresh")
 
-    assert missing_csrf.status_code == invalid_csrf.status_code == 403
     assert rotated.status_code == 204
     assert database_client.cookies[REFRESH_COOKIE_NAME] != old_refresh
     assert database_client.cookies[ACCESS_COOKIE_NAME]
@@ -138,15 +126,14 @@ async def test_refresh_grace_then_reuse_revokes_only_affected_session(
 ) -> None:
     await _register(database_client, "sessions@example.com")
     first_refresh = database_client.cookies[REFRESH_COOKIE_NAME]
-    csrf = database_client.cookies[CSRF_COOKIE_NAME]
     first_claims = TokenManager(settings).decode(first_refresh, expected_type="refresh")
 
-    rotated = await database_client.post("/api/v1/auth/refresh", headers={"X-CSRF-Token": csrf})
+    rotated = await database_client.post("/api/v1/auth/refresh")
     current_refresh = database_client.cookies[REFRESH_COOKIE_NAME]
     assert rotated.status_code == 204
 
     _replace_cookie(database_client, REFRESH_COOKIE_NAME, first_refresh, path=REFRESH_COOKIE_PATH)
-    concurrent = await database_client.post("/api/v1/auth/refresh", headers={"X-CSRF-Token": csrf})
+    concurrent = await database_client.post("/api/v1/auth/refresh")
     assert concurrent.status_code == 409
 
     async with AsyncSession(bind=database_connection) as session, session.begin():
@@ -155,13 +142,11 @@ async def test_refresh_grace_then_reuse_revokes_only_affected_session(
             .where(AuthSession.id == first_claims.session_id)
             .values(previous_refresh_token_valid_until=utc_now() - timedelta(seconds=1))
         )
-    reused = await database_client.post("/api/v1/auth/refresh", headers={"X-CSRF-Token": csrf})
+    reused = await database_client.post("/api/v1/auth/refresh")
     assert reused.status_code == 401
 
     _replace_cookie(database_client, REFRESH_COOKIE_NAME, current_refresh, path=REFRESH_COOKIE_PATH)
-    revoked_family = await database_client.post(
-        "/api/v1/auth/refresh", headers={"X-CSRF-Token": csrf}
-    )
+    revoked_family = await database_client.post("/api/v1/auth/refresh")
     assert revoked_family.status_code == 401
 
     database_client.cookies.clear()
@@ -177,9 +162,7 @@ async def test_logout_revokes_session_and_clears_cookies(database_client: AsyncC
     await _register(database_client, "logout@example.com")
     access_token = database_client.cookies[ACCESS_COOKIE_NAME]
 
-    logged_out = await database_client.post(
-        "/api/v1/auth/logout", headers=_csrf_header(database_client)
-    )
+    logged_out = await database_client.post("/api/v1/auth/logout")
     _replace_cookie(database_client, ACCESS_COOKIE_NAME, access_token, path="/")
     after_logout = await database_client.get("/api/v1/auth/me")
 
@@ -246,7 +229,7 @@ async def test_cookie_attributes_are_scoped_and_environment_aware(
     assert parsed[ACCESS_COOKIE_NAME]["httponly"] is True
     assert parsed[REFRESH_COOKIE_NAME]["path"] == REFRESH_COOKIE_PATH
     assert parsed[REFRESH_COOKIE_NAME]["httponly"] is True
-    assert parsed[CSRF_COOKIE_NAME]["httponly"] == ""
+    assert "rag_csrf_token" not in parsed
     assert all(cookie["samesite"].lower() == "lax" for cookie in parsed.values())
     assert all(cookie["secure"] == "" for cookie in parsed.values())
 

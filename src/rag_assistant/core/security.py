@@ -72,9 +72,6 @@ class TokenManager:
     def new_token_id(self) -> str:
         return secrets.token_urlsafe(32)
 
-    def new_csrf_token(self) -> str:
-        return secrets.token_urlsafe(32)
-
     def hash_identifier(self, value: str) -> str:
         return hmac.new(
             self._secret.encode("utf-8"),

@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from rag_assistant.api.auth import CSRF_COOKIE_NAME
 from rag_assistant.assistant import (
     AnswerCandidate,
     EvidenceAnswerValidator,
@@ -25,10 +24,6 @@ from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, Retrieval
 
 PASSWORD = "correct horse battery staple"
 SAMPLE_PDF = Path(__file__).parent / "fixtures" / "documents" / "sample_doc.pdf"
-
-
-def _csrf(client: AsyncClient) -> dict[str, str]:
-    return {"X-CSRF-Token": client.cookies[CSRF_COOKIE_NAME]}
 
 
 class DeterministicEmbeddingClient:
@@ -102,7 +97,7 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
     upload = await database_client.post(
         "/api/v1/documents?title=Persian%20RAG%20guide",
         content=SAMPLE_PDF.read_bytes(),
-        headers={"Content-Type": "application/pdf", **_csrf(database_client)},
+        headers={"Content-Type": "application/pdf"},
     )
     assert upload.status_code == 202
     document_id = upload.json()["id"]
@@ -128,14 +123,11 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
     version = indexed_document.json()["versions"][0]
     assert version["status"] == "succeeded"
 
-    conversation = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf(database_client)
-    )
+    conversation = await database_client.post("/api/v1/conversations", json={})
     conversation_id = conversation.json()["id"]
     selected = await database_client.put(
         f"/api/v1/conversations/{conversation_id}/documents",
         json={"document_ids": [document_id]},
-        headers=_csrf(database_client),
     )
     assert selected.status_code == 200
 
@@ -151,7 +143,7 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
     grounded = await database_client.post(
         f"/api/v1/conversations/{conversation_id}/messages",
         json={"content": "مراحل اصلی RAG چیست؟"},
-        headers={**_csrf(database_client), "Idempotency-Key": "end-to-end-grounded"},
+        headers={"Idempotency-Key": "end-to-end-grounded"},
     )
     assert grounded.status_code == 200
     answer = grounded.json()
@@ -166,7 +158,7 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
     abstained = await database_client.post(
         f"/api/v1/conversations/{conversation_id}/messages",
         json={"content": "سند درباره موضوع ناموجود چه می‌گوید؟"},
-        headers={**_csrf(database_client), "Idempotency-Key": "end-to-end-abstain"},
+        headers={"Idempotency-Key": "end-to-end-abstain"},
     )
     assert abstained.status_code == 200
     assert abstained.json()["answer_outcome"] == "abstained"
@@ -182,13 +174,11 @@ async def test_registered_upload_worker_grounded_chat_abstention_and_owner_isola
         assert other_registration.status_code == 201
         hidden_conversation = await other_client.get(f"/api/v1/conversations/{conversation_id}")
         assert hidden_conversation.status_code == 404
-        other_conversation = await other_client.post(
-            "/api/v1/conversations", json={}, headers=_csrf(other_client)
-        )
+        other_conversation = await other_client.post("/api/v1/conversations", json={})
         isolated = await other_client.post(
             f"/api/v1/conversations/{other_conversation.json()['id']}/messages",
             json={"content": "مراحل اصلی RAG چیست؟"},
-            headers={**_csrf(other_client), "Idempotency-Key": "end-to-end-isolation"},
+            headers={"Idempotency-Key": "end-to-end-isolation"},
         )
         assert isolated.status_code == 200
         assert isolated.json()["answer_outcome"] == "abstained"

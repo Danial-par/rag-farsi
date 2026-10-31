@@ -13,7 +13,6 @@ from rag_assistant.auth.service import (
     AuthenticationError,
     AuthResult,
     AuthService,
-    CsrfValidationError,
     RefreshResult,
     RefreshStatus,
 )
@@ -26,10 +25,7 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 ACCESS_COOKIE_NAME = "rag_access_token"
 REFRESH_COOKIE_NAME = "rag_refresh_token"
-CSRF_COOKIE_NAME = "rag_csrf_token"
-CSRF_HEADER_NAME = "X-CSRF-Token"
 REFRESH_COOKIE_PATH = "/api/v1/auth"
-UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 class Credentials(BaseModel):
@@ -67,14 +63,7 @@ async def get_current_user(
     if raw_token is None:
         raise _unauthorized("Not authenticated")
     try:
-        return await service.authenticate_access(
-            raw_token,
-            require_csrf=request.method in UNSAFE_METHODS,
-            csrf_cookie=request.cookies.get(CSRF_COOKIE_NAME),
-            csrf_header=request.headers.get(CSRF_HEADER_NAME),
-        )
-    except CsrfValidationError as exc:
-        raise _csrf_forbidden() from exc
+        return await service.authenticate_access(raw_token)
     except AuthenticationError as exc:
         raise _unauthorized("Not authenticated") from exc
 
@@ -138,13 +127,7 @@ async def refresh(
         return _auth_error_response(request.app.state.settings)
     try:
         async with session.begin():
-            result = await service.refresh(
-                raw_token,
-                csrf_cookie=request.cookies.get(CSRF_COOKIE_NAME),
-                csrf_header=request.headers.get(CSRF_HEADER_NAME),
-            )
-    except CsrfValidationError as exc:
-        raise _csrf_forbidden() from exc
+            result = await service.refresh(raw_token)
     except AuthenticationError:
         return _auth_error_response(request.app.state.settings)
 
@@ -173,13 +156,7 @@ async def logout(
         raise _unauthorized("Invalid authentication session")
     try:
         async with session.begin():
-            await service.logout(
-                raw_token,
-                csrf_cookie=request.cookies.get(CSRF_COOKIE_NAME),
-                csrf_header=request.headers.get(CSRF_HEADER_NAME),
-            )
-    except CsrfValidationError as exc:
-        raise _csrf_forbidden() from exc
+            await service.logout(raw_token)
     except AuthenticationError as exc:
         raise _unauthorized("Invalid authentication session") from exc
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -202,7 +179,6 @@ def _set_auth_cookies(response: Response, result: AuthResult, settings: Settings
         response,
         access_token=result.access_token,
         refresh_token=result.refresh_token,
-        csrf_token=result.csrf_token,
         session_expires_at=result.session_expires_at,
         settings=settings,
     )
@@ -213,7 +189,6 @@ def _set_session_cookies(
     *,
     access_token: str,
     refresh_token: str,
-    csrf_token: str,
     session_expires_at: datetime,
     settings: Settings,
 ) -> None:
@@ -236,22 +211,12 @@ def _set_session_cookies(
         http_only=True,
         settings=settings,
     )
-    _set_cookie(
-        response,
-        key=CSRF_COOKIE_NAME,
-        value=csrf_token,
-        max_age=refresh_max_age,
-        path="/",
-        http_only=False,
-        settings=settings,
-    )
 
 
 def _set_refreshed_cookies(response: Response, result: RefreshResult, settings: Settings) -> None:
     if (
         result.access_token is None
         or result.refresh_token is None
-        or result.csrf_token is None
         or not isinstance(result.session_expires_at, datetime)
     ):
         raise RuntimeError("Rotated refresh result is incomplete")
@@ -259,7 +224,6 @@ def _set_refreshed_cookies(response: Response, result: RefreshResult, settings: 
         response,
         access_token=result.access_token,
         refresh_token=result.refresh_token,
-        csrf_token=result.csrf_token,
         session_expires_at=result.session_expires_at,
         settings=settings,
     )
@@ -301,13 +265,6 @@ def _clear_auth_cookies(response: Response, settings: Settings) -> None:
         httponly=True,
         samesite="lax",
     )
-    response.delete_cookie(
-        CSRF_COOKIE_NAME,
-        path="/",
-        secure=settings.secure_cookies,
-        httponly=False,
-        samesite="lax",
-    )
 
 
 def _remaining_seconds(expires_at: datetime) -> int:
@@ -327,14 +284,6 @@ def _unauthorized(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=detail,
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-def _csrf_forbidden() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="CSRF validation failed",
         headers={"Cache-Control": "no-store"},
     )
 

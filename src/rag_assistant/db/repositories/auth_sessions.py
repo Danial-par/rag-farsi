@@ -27,7 +27,6 @@ class AuthSessionRepository:
         user_id: UUID,
         expires_at: datetime,
         refresh_token_hash: str,
-        csrf_token_hash: str,
         client_metadata: dict[str, Any] | None = None,
     ) -> AuthSession:
         user_exists = await self._session.scalar(
@@ -42,7 +41,6 @@ class AuthSessionRepository:
             user_id=user_id,
             expires_at=expires_at,
             refresh_token_hash=refresh_token_hash,
-            csrf_token_hash=csrf_token_hash,
             client_metadata=client_metadata or {},
         )
         self._session.add(auth_session)

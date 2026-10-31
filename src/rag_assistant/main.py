@@ -139,7 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_origins=resolved_settings.allowed_origins,
             allow_credentials=True,
             allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"],
+            allow_headers=["Content-Type", "X-Request-ID", "Idempotency-Key"],
             expose_headers=["X-Request-ID"],
         )
     application.state.settings = resolved_settings

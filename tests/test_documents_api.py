@@ -10,16 +10,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from rag_assistant.api.auth import CSRF_COOKIE_NAME
 from rag_assistant.db.models import Document, DocumentVersion
 from rag_assistant.db.repositories import DocumentRepository
 from rag_assistant.indexing.storage import LocalObjectStore, ObjectStoreError
 
 PASSWORD = "correct horse battery staple"
-
-
-def _csrf(client: AsyncClient) -> dict[str, str]:
-    return {"X-CSRF-Token": client.cookies[CSRF_COOKIE_NAME]}
 
 
 async def _register(client: AsyncClient, email: str) -> dict[str, str]:
@@ -45,7 +40,7 @@ async def test_document_upload_hashes_source_and_returns_pending_version(
     response = await database_client.post(
         "/api/v1/documents?title=Persian%20source",
         content=payload,
-        headers={"Content-Type": "application/pdf", **_csrf(database_client)},
+        headers={"Content-Type": "application/pdf"},
     )
 
     assert response.status_code == 202
@@ -86,21 +81,20 @@ async def test_upload_rejects_media_type_empty_body_and_non_pdf(
     database_client: AsyncClient,
 ) -> None:
     await _register(database_client, "validation-owner@example.com")
-    csrf = _csrf(database_client)
     wrong_type = await database_client.post(
         "/api/v1/documents?title=bad",
         content=b"%PDF-1.7",
-        headers={"Content-Type": "application/octet-stream", **csrf},
+        headers={"Content-Type": "application/octet-stream"},
     )
     empty = await database_client.post(
         "/api/v1/documents?title=bad",
         content=b"",
-        headers={"Content-Type": "application/pdf", **csrf},
+        headers={"Content-Type": "application/pdf"},
     )
     invalid = await database_client.post(
         "/api/v1/documents?title=bad",
         content=b"not a PDF",
-        headers={"Content-Type": "application/pdf", **csrf},
+        headers={"Content-Type": "application/pdf"},
     )
     assert wrong_type.status_code == 415
     assert empty.status_code == invalid.status_code == 422
@@ -118,7 +112,7 @@ async def test_document_endpoints_are_owner_scoped_and_soft_delete(
     uploaded = await database_client.post(
         "/api/v1/documents?title=Owned",
         content=payload,
-        headers={"Content-Type": "application/pdf", **_csrf(database_client)},
+        headers={"Content-Type": "application/pdf"},
     )
     assert uploaded.status_code == 202
     document_id = UUID(uploaded.json()["id"])
@@ -130,14 +124,12 @@ async def test_document_endpoints_are_owner_scoped_and_soft_delete(
         await _register(other_client, "second-owner@example.com")
         assert (await other_client.get(f"/api/v1/documents/{document_id}")).status_code == 404
         assert (
-            await other_client.delete(
-                f"/api/v1/documents/{document_id}", headers=_csrf(other_client)
-            )
+            await other_client.delete(f"/api/v1/documents/{document_id}")
         ).status_code == 404
         foreign_upload = await other_client.post(
             f"/api/v1/documents?document_id={document_id}",
             content=payload,
-            headers={"Content-Type": "application/pdf", **_csrf(other_client)},
+            headers={"Content-Type": "application/pdf"},
         )
         assert foreign_upload.status_code == 404
         assert len((await application.state.object_store.list("documents/")).objects) == 1
@@ -152,16 +144,13 @@ async def test_document_endpoints_are_owner_scoped_and_soft_delete(
         )
 
     retry = await database_client.post(
-        f"/api/v1/documents/{document_id}/versions/{version_id}/retry",
-        headers=_csrf(database_client),
+        f"/api/v1/documents/{document_id}/versions/{version_id}/retry"
     )
     assert retry.status_code == 202
     assert retry.json()["status"] == "pending"
     assert retry.json()["failure_message"] is None
 
-    deleted = await database_client.delete(
-        f"/api/v1/documents/{document_id}", headers=_csrf(database_client)
-    )
+    deleted = await database_client.delete(f"/api/v1/documents/{document_id}")
     assert deleted.status_code == 204
     assert (await database_client.get(f"/api/v1/documents/{document_id}")).status_code == 404
     async with AsyncSession(bind=database_connection) as session:
@@ -180,7 +169,7 @@ async def test_upload_enforces_configured_size_limit(
     response = await database_client.post(
         "/api/v1/documents?title=Large",
         content=b"%PDF-1.7 too large",
-        headers={"Content-Type": "application/pdf", **_csrf(database_client)},
+        headers={"Content-Type": "application/pdf"},
     )
     assert response.status_code == 413
 
@@ -200,7 +189,7 @@ async def test_upload_reports_storage_failure_without_creating_a_document(
     response = await database_client.post(
         "/api/v1/documents?title=Unavailable",
         content=b"%PDF-1.7\nfixture",
-        headers={"Content-Type": "application/pdf", **_csrf(database_client)},
+        headers={"Content-Type": "application/pdf"},
     )
 
     assert response.status_code == 503

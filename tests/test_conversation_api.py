@@ -8,7 +8,6 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from rag_assistant.api.auth import CSRF_COOKIE_NAME
 from rag_assistant.assistant import (
     AnswerCandidate,
     EvidenceAnswerValidator,
@@ -39,10 +38,6 @@ async def _register(client: AsyncClient, email: str) -> dict[str, Any]:
     )
     assert response.status_code == 201
     return cast(dict[str, Any], response.json())
-
-
-def _csrf_header(client: AsyncClient) -> dict[str, str]:
-    return {"X-CSRF-Token": client.cookies[CSRF_COOKIE_NAME]}
 
 
 async def _active_document(session: AsyncSession, owner_id: UUID) -> UUID:
@@ -118,18 +113,15 @@ def _workflow(application: FastAPI, *, retrieval_failure: Exception | None = Non
     )
 
 
-async def test_conversation_api_requires_authentication_and_csrf(
+async def test_conversation_api_requires_authentication_without_csrf_header(
     database_client: AsyncClient,
 ) -> None:
     denied = await database_client.get("/api/v1/conversations")
     assert denied.status_code == 401
 
     await _register(database_client, "chat-auth@example.com")
-    missing_csrf = await database_client.post("/api/v1/conversations", json={})
-    assert missing_csrf.status_code == 403
-
     created = await database_client.post(
-        "/api/v1/conversations", json={"title": "پرسش‌های من"}, headers=_csrf_header(database_client)
+        "/api/v1/conversations", json={"title": "پرسش‌های من"}
     )
     assert created.status_code == 201
     assert created.json()["title"] == "پرسش‌های من"
@@ -139,12 +131,8 @@ async def test_conversation_read_is_owner_scoped_and_lists_with_cursor(
     database_client: AsyncClient,
 ) -> None:
     await _register(database_client, "chat-owner@example.com")
-    first = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
-    second = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    first = await database_client.post("/api/v1/conversations", json={})
+    second = await database_client.post("/api/v1/conversations", json={})
     assert first.status_code == second.status_code == 201
     first_id = first.json()["id"]
 
@@ -161,19 +149,11 @@ async def test_conversation_rename_persists_and_is_owner_scoped(
     database_client: AsyncClient,
 ) -> None:
     await _register(database_client, "chat-rename-owner@example.com")
-    created = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    created = await database_client.post("/api/v1/conversations", json={})
     conversation_id = created.json()["id"]
-    missing_csrf = await database_client.patch(
-        f"/api/v1/conversations/{conversation_id}", json={"title": "تغییر نام"}
-    )
-    assert missing_csrf.status_code == 403
-
     renamed = await database_client.patch(
         f"/api/v1/conversations/{conversation_id}",
         json={"title": "  پژوهش‌های من  "},
-        headers=_csrf_header(database_client),
     )
 
     assert renamed.status_code == 200
@@ -187,7 +167,6 @@ async def test_conversation_rename_persists_and_is_owner_scoped(
     forbidden = await database_client.patch(
         f"/api/v1/conversations/{conversation_id}",
         json={"title": "نام دیگر"},
-        headers=_csrf_header(database_client),
     )
     assert forbidden.status_code == 404
 
@@ -196,14 +175,10 @@ async def test_conversation_delete_hides_it_from_reads_and_lists(
     database_client: AsyncClient,
 ) -> None:
     await _register(database_client, "chat-delete@example.com")
-    created = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    created = await database_client.post("/api/v1/conversations", json={})
     conversation_id = created.json()["id"]
 
-    deleted = await database_client.delete(
-        f"/api/v1/conversations/{conversation_id}", headers=_csrf_header(database_client)
-    )
+    deleted = await database_client.delete(f"/api/v1/conversations/{conversation_id}")
     listed = await database_client.get("/api/v1/conversations")
     read = await database_client.get(f"/api/v1/conversations/{conversation_id}")
 
@@ -217,17 +192,14 @@ async def test_conversation_rename_rejects_blank_or_oversized_title(
     database_client: AsyncClient,
 ) -> None:
     await _register(database_client, "chat-rename-validation@example.com")
-    created = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    created = await database_client.post("/api/v1/conversations", json={})
     conversation_id = created.json()["id"]
-    headers = _csrf_header(database_client)
 
     blank = await database_client.patch(
-        f"/api/v1/conversations/{conversation_id}", json={"title": "  "}, headers=headers
+        f"/api/v1/conversations/{conversation_id}", json={"title": "  "}
     )
     oversized = await database_client.patch(
-        f"/api/v1/conversations/{conversation_id}", json={"title": "x" * 501}, headers=headers
+        f"/api/v1/conversations/{conversation_id}", json={"title": "x" * 501}
     )
 
     assert blank.status_code == oversized.status_code == 422
@@ -243,13 +215,10 @@ async def test_document_selection_replaces_explicit_ids_and_checks_access(
         document_id = await _active_document(session, user_id)
         await session.commit()
 
-    conversation = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    conversation = await database_client.post("/api/v1/conversations", json={})
     selected = await database_client.put(
         f"/api/v1/conversations/{conversation.json()['id']}/documents",
         json={"document_ids": [str(document_id)]},
-        headers=_csrf_header(database_client),
     )
     assert selected.status_code == 200
     assert [item["id"] for item in selected.json()] == [str(document_id)]
@@ -257,7 +226,6 @@ async def test_document_selection_replaces_explicit_ids_and_checks_access(
     replaced = await database_client.put(
         f"/api/v1/conversations/{conversation.json()['id']}/documents",
         json={"document_ids": []},
-        headers=_csrf_header(database_client),
     )
     assert replaced.status_code == 200
     assert replaced.json() == []
@@ -265,7 +233,6 @@ async def test_document_selection_replaces_explicit_ids_and_checks_access(
     inaccessible = await database_client.put(
         f"/api/v1/conversations/{conversation.json()['id']}/documents",
         json={"document_ids": [str(UUID(int=1))]},
-        headers=_csrf_header(database_client),
     )
     assert inaccessible.status_code == 404
 
@@ -293,9 +260,7 @@ async def test_conversation_includes_active_shared_default_document(
         await repository.activate_shared_version(document_id=document.id, version_id=version.id)
         await session.commit()
 
-    response = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    response = await database_client.post("/api/v1/conversations", json={})
     assert response.status_code == 201
     assert response.json()["selected_documents"] == [
         {"id": str(document.id), "title": "پیش‌فرض عمومی"}
@@ -308,9 +273,7 @@ async def test_chat_serializes_partial_answer_and_whole_paragraph_citation(
     application: FastAPI,
 ) -> None:
     await _register(database_client, "chat-citation@example.com")
-    conversation = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    conversation = await database_client.post("/api/v1/conversations", json={})
     citation = {
         "source_paragraph_id": "10000000-0000-0000-0000-000000000001",
         "document_id": "20000000-0000-0000-0000-000000000002",
@@ -333,7 +296,7 @@ async def test_chat_serializes_partial_answer_and_whole_paragraph_citation(
     response = await database_client.post(
         f"/api/v1/conversations/{conversation.json()['id']}/messages",
         json={"content": "پرسش فارسی"},
-        headers={**_csrf_header(database_client), "Idempotency-Key": "citation-1"},
+        headers={"Idempotency-Key": "citation-1"},
     )
     assert response.status_code == 200
     body = response.json()
@@ -357,12 +320,10 @@ async def test_chat_persists_abstention_history_and_replays_idempotently(
     database_connection: AsyncConnection,
 ) -> None:
     await _register(database_client, "chat-retry@example.com")
-    conversation = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    conversation = await database_client.post("/api/v1/conversations", json={})
     conversation_id = conversation.json()["id"]
     application.state.rag_workflow = _workflow(application)
-    headers = {**_csrf_header(database_client), "Idempotency-Key": "question-1"}
+    headers = {"Idempotency-Key": "question-1"}
     payload = {"content": "این سند چه می‌گوید؟"}
 
     answer = await database_client.post(
@@ -412,16 +373,14 @@ async def test_chat_failure_returns_persisted_assistant_message_id(
     application: FastAPI,
 ) -> None:
     await _register(database_client, "chat-failure@example.com")
-    conversation = await database_client.post(
-        "/api/v1/conversations", json={}, headers=_csrf_header(database_client)
-    )
+    conversation = await database_client.post("/api/v1/conversations", json={})
     application.state.rag_workflow = _workflow(
         application, retrieval_failure=RuntimeError("private provider details")
     )
     response = await database_client.post(
         f"/api/v1/conversations/{conversation.json()['id']}/messages",
         json={"content": "پرسش"},
-        headers={**_csrf_header(database_client), "Idempotency-Key": "failed-once"},
+        headers={"Idempotency-Key": "failed-once"},
     )
     assert response.status_code == 503
     detail = response.json()["detail"]
