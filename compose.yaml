@@ -18,5 +18,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    command: ["--model-id", "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}"]
+    ports:
+      - "127.0.0.1:${RERANKER_PORT:-8081}:80"
+    volumes:
+      - reranker_data:/data
+
 volumes:
   postgres_data:
+  reranker_data:

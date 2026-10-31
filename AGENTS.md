@@ -51,6 +51,8 @@
 - Store each source object's owner, object key, content hash, ingestion status, and extraction metadata in PostgreSQL.
 - Access models through OpenRouter's OpenAI-compatible API using `OPENROUTER_API_KEY`.
 - Default to `openai/gpt-6-luna` for chat and `openai/text-embedding-3-large` with 1024 dimensions for embeddings.
+- Rerank an authorization-scoped vector candidate set with a TEI-compatible cross-encoder endpoint, defaulting to `BAAI/bge-reranker-v2-m3`.
+- Let a bounded structured chat-model decision choose between the final ranked passages, a parent-section expansion, or a small sibling-section fetch; resolve all section aliases server-side.
 - Keep gateway URL, model identifiers, and embedding dimensions configurable.
 - Use OpenRouter's default automatic upstream routing.
 - Persist the embedding model and dimensions with indexed data, and never compare vectors from incompatible embedding configurations.
@@ -117,7 +119,7 @@
 - Use deterministic fixtures and mock external model, object-storage, and observability calls in automated tests.
 - Run PostgreSQL integration and migration tests against a disposable pgvector database provided by Testcontainers.
 - Trace every LangGraph node with Langfuse. Questions and final answers may be traced; source document text, citations, raw provider responses, cookies, JWTs, and secrets must not be recorded.
-- Production requires OpenRouter credentials, S3 storage, and exact allowed browser origins. Trust forwarded headers only from configured proxy IP addresses or CIDRs.
+- Production requires OpenRouter credentials, a configured cross-encoder reranker endpoint, S3 storage, and exact allowed browser origins. Trust forwarded headers only from configured proxy IP addresses or CIDRs.
 - Keep deterministic evaluation offline and advisory by default; live provider evaluations are explicitly invoked and excluded from normal tests.
 - Run the locked lint, formatting, type, migration, and test checks in GitHub Actions on pushes and pull requests.
 - Preserve this file for durable, project-wide facts only. Do not add roadmap status, implementation history, rationale, or temporary task notes.

@@ -64,6 +64,7 @@ Set these values and save the file:
 ```dotenv
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=your-api-key
+RERANKER_BASE_URL=http://127.0.0.1:8081
 ```
 
 `OPENROUTER_BASE_URL` may instead be the full `/api/v1` URL of another OpenRouter-compatible service. Keep these defaults unless the service uses different model names:
@@ -77,14 +78,18 @@ EMBEDDING_DIMENSIONS=1024
 
 The `.env` file contains secrets and is ignored by Git. Do not commit or share it. Langfuse settings are optional and may remain empty.
 
-When an OpenRouter key is configured, ingestion uses the chat model to identify heading levels and save parent/child section paths in chunk metadata. If annotation is disabled or unavailable, deterministic PDF heading labels remain as a fallback. Retrieval first searches a larger dense candidate set, then uses the chat model to rerank chunks and expand up to two relevant sections (for broad questions or missing surrounding context). These limits can be adjusted with `RETRIEVAL_CANDIDATE_COUNT`, `RETRIEVAL_MAX_EXPANDED_SECTIONS`, and `RETRIEVAL_SECTION_MAX_CHARACTERS`.
+The local reranker runs in Hugging Face Text Embeddings Inference (TEI) and downloads the model weights the first time it starts. `RERANKER_BASE_URL` must point to that service; the default Compose mapping is `http://127.0.0.1:8081`. The cross-encoder model is configurable with `RERANKER_MODEL`.
+
+When an OpenRouter key is configured, ingestion uses the chat model to identify heading levels and save parent/child section paths in chunk metadata. If annotation is disabled or unavailable, deterministic PDF heading labels remain as a fallback. Retrieval is a set of visible LangGraph stages: authorized vector search gathers up to 30 candidates, a multilingual `BAAI/bge-reranker-v2-m3` cross-encoder selects the final top six, and a compact chat-model assessment either uses those passages or asks for a bounded parent-section or sibling-section fetch. Expansion is reauthorized in the database and capped by `RETRIEVAL_MAX_EXPANDED_SECTIONS` and `RETRIEVAL_SECTION_MAX_CHARACTERS`.
 
 ### 4. Start PostgreSQL and prepare the database
 
 ```powershell
-docker compose up -d database
+docker compose up -d database reranker
 uv run alembic upgrade head
 ```
+
+The reranker may take a few minutes to download and load its model on first startup. Wait for `http://127.0.0.1:8081/health` to return successfully before sending chat requests.
 
 Verify that the configured chat and embedding models are reachable:
 
