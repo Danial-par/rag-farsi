@@ -18,6 +18,7 @@ from sqlalchemy import select
 from rag_assistant.assistant import (
     AnswerGenerator,
     EvidenceAnswerValidator,
+    EvidenceRetriever,
     LangfuseNodeObserver,
     OpenRouterAnswerGenerator,
     RAGDependencies,
@@ -49,8 +50,17 @@ from rag_assistant.evaluation import (
 )
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.main import _SessionScopedRetriever
-from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+    RetrievalService,
+)
 from rag_assistant.retrieval.planner import retrieval_planner_from_settings
+from rag_assistant.retrieval.reranker import TextEmbeddingsInferenceReranker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = PROJECT_ROOT / "tests" / "fixtures" / "evaluation" / "sample_doc.json"
@@ -71,13 +81,63 @@ class EvaluationExecutionError(RuntimeError):
 class _ObservedRetriever:
     """Delegate to production retrieval while retaining only safe source identities."""
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: EvidenceRetriever) -> None:
         self._inner = inner
         self.last_result: RetrievalResult | None = None
 
-    async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
-        self.last_result = await self._inner.retrieve(request)
-        return self.last_result
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates:
+        return await self._inner.retrieve_candidates(request)
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates:
+        return await self._inner.rerank_candidates(candidates)
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision:
+        decision = await self._inner.assess_context(
+            question=question,
+            candidates=candidates,
+            ranked=ranked,
+        )
+        if decision.action == "answer":
+            self.last_result = RetrievalService.assemble_result(
+                candidates, ranked, ExpandedRetrievalContext()
+            )
+        return decision
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None:
+        await self._inner.validate_scope(
+            request=request,
+            ranked=ranked,
+            decision=decision,
+        )
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext:
+        expanded = await self._inner.expand_context(
+            request=request,
+            candidates=candidates,
+            ranked=ranked,
+            decision=decision,
+        )
+        self.last_result = RetrievalService.assemble_result(candidates, ranked, expanded)
+        return expanded
 
 
 async def run_live_evaluation(
@@ -106,6 +166,7 @@ async def run_live_evaluation(
     if session_factory is None:
         engine, session_factory = create_database_resources(settings)
     owns_embedding = embedding_client is None
+    reranker = None
     if embedding_client is None:
         embedding_client = OpenRouterEmbeddingClient(
             base_url=str(settings.openrouter_base_url),
@@ -115,11 +176,13 @@ async def run_live_evaluation(
         )
     observed_retriever: _ObservedRetriever | None = None
     if workflow is None:
+        reranker = TextEmbeddingsInferenceReranker.from_settings(settings)
         observed_retriever = _ObservedRetriever(
             _SessionScopedRetriever(
                 session_factory,
                 embedding_client,
                 settings,
+                reranker=reranker,
                 planner=retrieval_planner_from_settings(settings),
             )
         )
@@ -230,6 +293,8 @@ async def run_live_evaluation(
             EvaluationDataset(dataset_id=dataset.dataset_id, cases=scored_cases), observations
         )
     finally:
+        if reranker is not None:
+            await reranker.aclose()
         if owns_embedding:
             await embedding_client.aclose()  # type: ignore[attr-defined]
         if owns_engine and engine is not None:
@@ -372,14 +437,21 @@ async def _retrieve_once(
     conversation_id: UUID,
     case: EvaluationCase,
 ) -> RetrievalResult:
-    return await _SessionScopedRetriever(
-        session_factory,
-        embedding_client,
-        settings,
-        planner=retrieval_planner_from_settings(settings),
-    ).retrieve(
-        RetrievalRequest(user_id=user_id, conversation_id=conversation_id, question=case.question)
-    )
+    reranker = TextEmbeddingsInferenceReranker.from_settings(settings)
+    try:
+        return await _SessionScopedRetriever(
+            session_factory,
+            embedding_client,
+            settings,
+            reranker=reranker,
+            planner=retrieval_planner_from_settings(settings),
+        ).retrieve(
+            RetrievalRequest(
+                user_id=user_id, conversation_id=conversation_id, question=case.question
+            )
+        )
+    finally:
+        await reranker.aclose()
 
 
 async def _persisted_usage(

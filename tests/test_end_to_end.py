@@ -20,7 +20,15 @@ from rag_assistant.db.models import AnswerOutcome
 from rag_assistant.indexing import DocumentIndexingService
 from rag_assistant.indexing.storage import LocalObjectStore
 from rag_assistant.indexing.worker import DocumentIngestionWorker
-from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, RetrievalService
+from rag_assistant.retrieval import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+    RetrievalService,
+)
 
 PASSWORD = "correct horse battery staple"
 SAMPLE_PDF = Path(__file__).parent / "fixtures" / "documents" / "sample_doc.pdf"
@@ -50,13 +58,75 @@ class SessionRetriever:
         self.application = application
         self.embeddings = embeddings
 
-    async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates:
         async with self.application.state.session_factory() as session:
             return await RetrievalService(
                 session=session,
                 embedding_client=self.embeddings,
                 settings=self.application.state.settings,
-            ).retrieve(request)
+            ).retrieve_candidates(request)
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates:
+        async with self.application.state.session_factory() as session:
+            service = RetrievalService(
+                session=session,
+                embedding_client=self.embeddings,
+                settings=self.application.state.settings,
+            )
+            return await service.rerank_candidates(candidates)
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision:
+        async with self.application.state.session_factory() as session:
+            service = RetrievalService(
+                session=session,
+                embedding_client=self.embeddings,
+                settings=self.application.state.settings,
+            )
+            return await service.assess_context(
+                question=question,
+                candidates=candidates,
+                ranked=ranked,
+            )
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None:
+        async with self.application.state.session_factory() as session:
+            await RetrievalService(
+                session=session,
+                embedding_client=self.embeddings,
+                settings=self.application.state.settings,
+            ).validate_scope(request=request, ranked=ranked, decision=decision)
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext:
+        async with self.application.state.session_factory() as session:
+            return await RetrievalService(
+                session=session,
+                embedding_client=self.embeddings,
+                settings=self.application.state.settings,
+            ).expand_context(
+                request=request,
+                candidates=candidates,
+                ranked=ranked,
+                decision=decision,
+            )
 
 
 class GroundedGenerator:

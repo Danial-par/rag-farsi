@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_assistant import __version__
 from rag_assistant.api.health import router as health_router
@@ -34,10 +35,18 @@ from rag_assistant.db.session import AsyncSessionFactory, create_database_resour
 from rag_assistant.indexing import create_object_store
 from rag_assistant.indexing.embeddings import EmbeddingClient, OpenRouterEmbeddingClient
 from rag_assistant.retrieval import RetrievalRequest, RetrievalResult, RetrievalService
+from rag_assistant.retrieval.models import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+)
 from rag_assistant.retrieval.planner import (
     RetrievalPlanner,
     retrieval_planner_from_settings,
 )
+from rag_assistant.retrieval.reranker import CandidateReranker, TextEmbeddingsInferenceReranker
+from rag_assistant.retrieval.stages import RetrievalModelStages
 from rag_assistant.web.router import router as web_router
 
 
@@ -49,22 +58,91 @@ class _SessionScopedRetriever:
         session_factory: AsyncSessionFactory,
         embedding_client: EmbeddingClient,
         settings: Settings,
+        reranker: CandidateReranker,
         planner: RetrievalPlanner | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_client = embedding_client
         self._settings = settings
-        self._planner = planner
+        self._model_stages = RetrievalModelStages(
+            settings=settings,
+            reranker=reranker,
+            planner=planner,
+        )
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        candidates = await self.retrieve_candidates(request)
+        ranked = await self.rerank_candidates(candidates)
+        decision = await self.assess_context(
+            question=request.question,
+            candidates=candidates,
+            ranked=ranked,
+        )
+        expanded = await self.expand_context(
+            request=request,
+            candidates=candidates,
+            ranked=ranked,
+            decision=decision,
+        )
+        return RetrievalService.assemble_result(candidates, ranked, expanded)
+
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates:
         async with self._session_factory() as session:
-            service = RetrievalService(
-                session=session,
-                embedding_client=self._embedding_client,
-                settings=self._settings,
-                planner=self._planner,
+            return await self._service(session).retrieve_candidates(request)
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates:
+        return await self._model_stages.rerank_candidates(candidates)
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision:
+        return await self._model_stages.assess_context(
+            question=question,
+            candidates=candidates,
+            ranked=ranked,
+        )
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext:
+        async with self._session_factory() as session:
+            return await self._service(session).expand_context(
+                request=request,
+                candidates=candidates,
+                ranked=ranked,
+                decision=decision,
             )
-            return await service.retrieve(request)
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None:
+        async with self._session_factory() as session:
+            await self._service(session).validate_scope(
+                request=request,
+                ranked=ranked,
+                decision=decision,
+            )
+
+    def _service(self, session: AsyncSession) -> RetrievalService:
+        return RetrievalService(
+            session=session,
+            embedding_client=self._embedding_client,
+            settings=self._settings,
+            model_stages=self._model_stages,
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -78,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         embedding_client = None
+        reranker = None
         recovery_task = None
         try:
             if resolved_settings.openrouter_api_key is not None:
@@ -88,12 +167,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     read_timeout_seconds=resolved_settings.embedding_read_timeout_seconds,
                 )
                 retrieval_planner = retrieval_planner_from_settings(resolved_settings)
+                reranker = TextEmbeddingsInferenceReranker.from_settings(resolved_settings)
                 application.state.rag_workflow = create_rag_workflow(
                     RAGDependencies(
                         retriever=_SessionScopedRetriever(
                             session_factory,
                             embedding_client,
                             resolved_settings,
+                            reranker=reranker,
                             planner=retrieval_planner,
                         ),
                         generator=OpenRouterAnswerGenerator.from_settings(resolved_settings),
@@ -124,6 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await recovery_task
             if embedding_client is not None:
                 await embedding_client.aclose()
+            if reranker is not None:
+                await reranker.aclose()
             shutdown_langfuse(resolved_settings)
             await engine.dispose()
             await logger.ainfo("application_stopped")

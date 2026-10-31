@@ -26,7 +26,14 @@ from rag_assistant.db.repositories import (
     DocumentRepository,
     NewDocumentVersion,
 )
-from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+)
 
 PASSWORD = "correct horse battery staple"
 
@@ -68,16 +75,49 @@ class EmptyRetriever:
     def __init__(self, failure: Exception | None = None) -> None:
         self.failure = failure
 
-    async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
-        del request
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates:
         if self.failure is not None:
             raise self.failure
-        return RetrievalResult(
-            normalized_query="",
+        return RetrievalCandidates(
+            normalized_query=request.question,
             embedding_model="openai/text-embedding-3-large",
             embedding_dimensions=1024,
-            evidence=(),
+            candidates=(),
         )
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates:
+        del candidates
+        return RankedCandidates(candidates=())
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision:
+        del question, candidates, ranked
+        return RetrievalDecision(action="answer")
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None:
+        del request, ranked, decision
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext:
+        del request, candidates, ranked, decision
+        return ExpandedRetrievalContext()
 
 
 class UnusedGenerator:
@@ -120,9 +160,7 @@ async def test_conversation_api_requires_authentication_without_csrf_header(
     assert denied.status_code == 401
 
     await _register(database_client, "chat-auth@example.com")
-    created = await database_client.post(
-        "/api/v1/conversations", json={"title": "پرسش‌های من"}
-    )
+    created = await database_client.post("/api/v1/conversations", json={"title": "پرسش‌های من"})
     assert created.status_code == 201
     assert created.json()["title"] == "پرسش‌های من"
 

@@ -28,7 +28,14 @@ from rag_assistant.assistant.models import (
 from rag_assistant.assistant.ports import RAGDependencies
 from rag_assistant.db.models import AnswerOutcome, MessageStatus
 from rag_assistant.db.repositories.conversations import IdempotencyConflictError
-from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+)
 from rag_assistant.retrieval.errors import RetrievalError
 
 HISTORY_MESSAGE_LIMIT = 12
@@ -51,6 +58,10 @@ class RAGState(TypedDict):
     context: NotRequired[ConversationContext]
     execution: NotRequired[ExecutionRecord]
     prepared_question: NotRequired[str]
+    retrieval_candidates: NotRequired[RetrievalCandidates]
+    ranked_candidates: NotRequired[RankedCandidates]
+    retrieval_decision: NotRequired[RetrievalDecision]
+    expanded_context: NotRequired[ExpandedRetrievalContext]
     evidence: NotRequired[RetrievalResult]
     evidence_sufficient: NotRequired[bool]
     candidate: NotRequired[AnswerCandidate]
@@ -72,9 +83,18 @@ _NODE_DESCRIPTIONS = {
     "prepare_question": (
         "Prepare the current question for retrieval; conversation history is not used here."
     ),
-    "retrieve_evidence": (
-        "Search only documents authorized for this conversation and return ranked evidence."
+    "retrieve_candidates": (
+        "Find vector candidates and a bounded outline within authorized documents."
     ),
+    "rerank_candidates": "Rerank the vector candidates with a multilingual cross-encoder.",
+    "assess_context": (
+        "Decide whether the top passages are enough or a bounded section fetch is needed."
+    ),
+    "validate_retrieval_scope": (
+        "Recheck that selected evidence is still in the conversation's authorized scope."
+    ),
+    "expand_context": "Fetch selected parent or sibling sections inside authorized document scope.",
+    "assemble_evidence": "Combine the final ranked chunks and any fetched section context.",
     "assess_evidence": (
         "Decide whether retrieval returned any evidence that can be passed to generation."
     ),
@@ -321,24 +341,124 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
 
         return await guarded(state, node_name="prepare_question", action=action)
 
-    @observe(name="rag.retrieve_evidence", capture_input=False, capture_output=False)
-    async def retrieve_evidence(state: RAGState) -> NodeResult:
+    @observe(name="rag.retrieve_candidates", capture_input=False, capture_output=False)
+    async def retrieve_candidates(state: RAGState) -> NodeResult:
         async def action() -> NodeResult:
-            evidence = await dependencies.retriever.retrieve(
-                RetrievalRequest(
-                    user_id=state["user_id"],
-                    conversation_id=state["conversation_id"],
-                    question=state["prepared_question"],
-                )
+            request = RetrievalRequest(
+                user_id=state["user_id"],
+                conversation_id=state["conversation_id"],
+                question=state["prepared_question"],
+            )
+            candidates = await dependencies.retriever.retrieve_candidates(request)
+            await record_node(
+                state,
+                node_name="retrieve_candidates",
+                extra={
+                    "vector_candidate_count": len(candidates.candidates),
+                    "section_outline_count": len(candidates.section_outline),
+                },
+            )
+            return {"retrieval_candidates": candidates}
+
+        return await guarded(state, node_name="retrieve_candidates", action=action)
+
+    @observe(name="rag.rerank_candidates", capture_input=False, capture_output=False)
+    async def rerank_candidates(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            ranked = await dependencies.retriever.rerank_candidates(state["retrieval_candidates"])
+            await record_node(
+                state,
+                node_name="rerank_candidates",
+                extra={
+                    "reranked_candidate_count": len(ranked.candidates),
+                    "reranker_fallback_used": int(ranked.fallback_used),
+                },
+            )
+            return {"ranked_candidates": ranked}
+
+        return await guarded(state, node_name="rerank_candidates", action=action)
+
+    @observe(name="rag.assess_context", capture_input=False, capture_output=False)
+    async def assess_context(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            decision = await dependencies.retriever.assess_context(
+                question=state["prepared_question"],
+                candidates=state["retrieval_candidates"],
+                ranked=state["ranked_candidates"],
             )
             await record_node(
                 state,
-                node_name="retrieve_evidence",
-                extra={"evidence_chunk_count": len(evidence.evidence)},
+                node_name="assess_context",
+                extra={
+                    "context_action": decision.action,
+                    "context_section_count": len(decision.sections),
+                },
+            )
+            return {"retrieval_decision": decision}
+
+        return await guarded(state, node_name="assess_context", action=action)
+
+    @observe(name="rag.validate_retrieval_scope", capture_input=False, capture_output=False)
+    async def validate_retrieval_scope(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            await dependencies.retriever.validate_scope(
+                request=RetrievalRequest(
+                    user_id=state["user_id"],
+                    conversation_id=state["conversation_id"],
+                    question=state["prepared_question"],
+                ),
+                ranked=state["ranked_candidates"],
+                decision=state["retrieval_decision"],
+            )
+            await record_node(state, node_name="validate_retrieval_scope")
+            return {}
+
+        return await guarded(state, node_name="validate_retrieval_scope", action=action)
+
+    @observe(name="rag.expand_context", capture_input=False, capture_output=False)
+    async def expand_context(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            expanded = await dependencies.retriever.expand_context(
+                request=RetrievalRequest(
+                    user_id=state["user_id"],
+                    conversation_id=state["conversation_id"],
+                    question=state["prepared_question"],
+                ),
+                candidates=state["retrieval_candidates"],
+                ranked=state["ranked_candidates"],
+                decision=state["retrieval_decision"],
+            )
+            await record_node(
+                state,
+                node_name="expand_context",
+                extra={"expanded_section_count": len(expanded.sections)},
+            )
+            return {"expanded_context": expanded}
+
+        return await guarded(state, node_name="expand_context", action=action)
+
+    @observe(name="rag.assemble_evidence", capture_input=False, capture_output=False)
+    async def assemble_evidence(state: RAGState) -> NodeResult:
+        async def action() -> NodeResult:
+            expanded = state.get("expanded_context", ExpandedRetrievalContext())
+            evidence = RetrievalResult(
+                normalized_query=state["retrieval_candidates"].normalized_query,
+                embedding_model=state["retrieval_candidates"].embedding_model,
+                embedding_dimensions=state["retrieval_candidates"].embedding_dimensions,
+                evidence=tuple(item.evidence for item in state["ranked_candidates"].candidates),
+                context_sections=expanded.sections,
+            )
+            await record_node(
+                state,
+                node_name="assemble_evidence",
+                extra={
+                    "evidence_chunk_count": len(evidence.evidence),
+                    "expanded_section_count": len(evidence.context_sections),
+                },
             )
             return {"evidence": evidence}
 
-        return await guarded(state, node_name="retrieve_evidence", action=action)
+        return await guarded(state, node_name="assemble_evidence", action=action)
 
     @observe(name="rag.assess_evidence", capture_input=False, capture_output=False)
     async def assess_evidence(state: RAGState) -> NodeResult:
@@ -462,7 +582,12 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     graph.add_node("load_conversation", load_conversation)
     graph.add_node("create_execution", create_execution)
     graph.add_node("prepare_question", prepare_question)
-    graph.add_node("retrieve_evidence", retrieve_evidence)
+    graph.add_node("retrieve_candidates", retrieve_candidates)
+    graph.add_node("rerank_candidates", rerank_candidates)
+    graph.add_node("assess_context", assess_context)
+    graph.add_node("validate_retrieval_scope", validate_retrieval_scope)
+    graph.add_node("expand_context", expand_context)
+    graph.add_node("assemble_evidence", assemble_evidence)
     graph.add_node("assess_evidence", assess_evidence)
     graph.add_node("abstain", abstain)
     graph.add_node("generate_answer", generate_answer)
@@ -483,10 +608,39 @@ def create_rag_workflow(dependencies: RAGDependencies) -> RAGWorkflow:
     graph.add_conditional_edges(
         "prepare_question",
         _route_after_execution,
-        {"continue": "retrieve_evidence", "failed": "persist_failed"},
+        {"continue": "retrieve_candidates", "failed": "persist_failed"},
     )
     graph.add_conditional_edges(
-        "retrieve_evidence",
+        "retrieve_candidates",
+        _route_after_execution,
+        {"continue": "rerank_candidates", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "rerank_candidates",
+        _route_after_execution,
+        {"continue": "assess_context", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "assess_context",
+        _route_after_context_assessment,
+        {
+            "expand": "expand_context",
+            "answer": "validate_retrieval_scope",
+            "failed": "persist_failed",
+        },
+    )
+    graph.add_conditional_edges(
+        "validate_retrieval_scope",
+        _route_after_execution,
+        {"continue": "assemble_evidence", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "expand_context",
+        _route_after_execution,
+        {"continue": "assemble_evidence", "failed": "persist_failed"},
+    )
+    graph.add_conditional_edges(
+        "assemble_evidence",
         _route_after_execution,
         {"continue": "assess_evidence", "failed": "persist_failed"},
     )
@@ -535,6 +689,12 @@ def _route_after_execution(state: RAGState) -> str:
     return "failed" if "failure" in state else "continue"
 
 
+def _route_after_context_assessment(state: RAGState) -> str:
+    if "failure" in state:
+        return "failed"
+    return "expand" if state["retrieval_decision"].action != "answer" else "answer"
+
+
 def _route_after_assessment(state: RAGState) -> str:
     if "failure" in state:
         return "failed"
@@ -558,7 +718,14 @@ def _classify_failure(node_name: str, exc: Exception) -> WorkflowFailure:
             error_code="retrieval_failed",
             safe_message="Evidence retrieval could not be completed.",
         )
-    if node_name == "retrieve_evidence":
+    if node_name in {
+        "retrieve_candidates",
+        "rerank_candidates",
+        "assess_context",
+        "validate_retrieval_scope",
+        "expand_context",
+        "assemble_evidence",
+    }:
         return WorkflowFailure(
             node_name=node_name,
             error_code="retrieval_failed",

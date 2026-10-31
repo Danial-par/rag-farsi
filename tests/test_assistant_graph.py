@@ -22,7 +22,19 @@ from rag_assistant.assistant.errors import ConversationAuthorizationError
 from rag_assistant.assistant.models import ExecutionRecord
 from rag_assistant.db.models import AnswerOutcome, MessageRole, MessageStatus, ParagraphKind
 from rag_assistant.db.repositories import ConversationRepository, UserRepository
-from rag_assistant.retrieval import CitationSource, EvidenceChunk, RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval import (
+    CitationSource,
+    EvidenceChunk,
+    EvidenceSection,
+    ExpandedRetrievalContext,
+    RankedCandidate,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+    SectionSelection,
+)
 
 
 def _evidence(paragraph_id: UUID | None = None) -> RetrievalResult:
@@ -136,13 +148,64 @@ class FakePersistence:
 
 
 class FakeRetriever:
-    def __init__(self, result: RetrievalResult) -> None:
+    def __init__(
+        self,
+        result: RetrievalResult,
+        *,
+        decision: RetrievalDecision | None = None,
+        expanded: ExpandedRetrievalContext | None = None,
+    ) -> None:
         self.result = result
+        self.decision = decision or RetrievalDecision(action="answer")
+        self.expanded = expanded or ExpandedRetrievalContext()
         self.requests: list[RetrievalRequest] = []
 
-    async def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates:
         self.requests.append(request)
-        return self.result
+        return RetrievalCandidates(
+            normalized_query=self.result.normalized_query,
+            embedding_model=self.result.embedding_model,
+            embedding_dimensions=self.result.embedding_dimensions,
+            candidates=self.result.evidence,
+        )
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates:
+        return RankedCandidates(
+            candidates=tuple(
+                RankedCandidate(evidence=item, score=item.cosine_similarity)
+                for item in candidates.candidates
+            )
+        )
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision:
+        del question, candidates, ranked
+        return self.decision
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None:
+        del request, ranked, decision
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext:
+        del request, candidates, ranked, decision
+        return self.expanded
 
 
 class FakeGenerator:
@@ -247,7 +310,11 @@ async def test_graph_generates_validated_evidence_grounded_answer() -> None:
         "load_conversation",
         "create_execution",
         "prepare_question",
-        "retrieve_evidence",
+        "retrieve_candidates",
+        "rerank_candidates",
+        "assess_context",
+        "validate_retrieval_scope",
+        "assemble_evidence",
         "assess_evidence",
         "generate_answer",
         "validate_answer",
@@ -255,6 +322,57 @@ async def test_graph_generates_validated_evidence_grounded_answer() -> None:
     ]
     assert all("conversation_id" in metadata for _, metadata in observer.events)
     assert all("پرسش" not in str(metadata) for _, metadata in observer.events)
+
+
+async def test_graph_expands_a_planner_selected_section_before_generation() -> None:
+    source_id = uuid4()
+    initial = _evidence(source_id)
+    chunk = initial.evidence[0]
+    section_id = uuid4()
+    section = EvidenceSection(
+        section_id=section_id,
+        document_id=chunk.document_id,
+        document_version_id=chunk.document_version_id,
+        document_title=chunk.document_title,
+        heading_path=("بخش اصلی",),
+        normalized_text="متن کامل بخش",
+        citation_sources=chunk.citation_sources,
+    )
+    retriever = FakeRetriever(
+        initial,
+        decision=RetrievalDecision(
+            action="expand_section",
+            sections=(
+                SectionSelection(
+                    document_version_id=chunk.document_version_id,
+                    section_id=section_id,
+                    heading_path=("بخش اصلی",),
+                ),
+            ),
+        ),
+        expanded=ExpandedRetrievalContext(sections=(section,)),
+    )
+    generator = FakeGenerator(
+        AnswerCandidate(
+            content="پاسخ مستند [1]",
+            outcome=AnswerOutcome.FULLY_ANSWERED,
+            cited_paragraph_ids=(source_id,),
+        )
+    )
+    observer = RecordingObserver()
+
+    output = await _workflow(
+        persistence=FakePersistence(),
+        retriever=retriever,
+        generator=generator,
+        validator=FakeValidator(),
+        observer=observer,
+    ).ainvoke(RAGGraphInput(user_id=uuid4(), conversation_id=uuid4(), question="نمای کلی"))
+
+    assert output.outcome is AnswerOutcome.FULLY_ANSWERED
+    assert generator.calls[0][2].context_sections == (section,)
+    assert "expand_context" in [name for name, _ in observer.events]
+    assert "assemble_evidence" in [name for name, _ in observer.events]
 
 
 async def test_graph_abstains_and_persists_no_citations_when_retrieval_is_empty() -> None:

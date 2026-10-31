@@ -16,13 +16,47 @@ from rag_assistant.assistant.models import (
     ExecutionRecord,
     RAGGraphOutput,
 )
-from rag_assistant.retrieval import RetrievalRequest, RetrievalResult
+from rag_assistant.retrieval import (
+    ExpandedRetrievalContext,
+    RankedCandidates,
+    RetrievalCandidates,
+    RetrievalDecision,
+    RetrievalRequest,
+    RetrievalResult,
+)
 
 
 class EvidenceRetriever(Protocol):
-    """Retrieve authorization-scoped evidence for one prepared question."""
+    """Run individually observable retrieval stages for one prepared question."""
 
-    async def retrieve(self, request: RetrievalRequest) -> RetrievalResult: ...
+    async def retrieve_candidates(self, request: RetrievalRequest) -> RetrievalCandidates: ...
+
+    async def rerank_candidates(self, candidates: RetrievalCandidates) -> RankedCandidates: ...
+
+    async def assess_context(
+        self,
+        *,
+        question: str,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+    ) -> RetrievalDecision: ...
+
+    async def validate_scope(
+        self,
+        *,
+        request: RetrievalRequest,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> None: ...
+
+    async def expand_context(
+        self,
+        *,
+        request: RetrievalRequest,
+        candidates: RetrievalCandidates,
+        ranked: RankedCandidates,
+        decision: RetrievalDecision,
+    ) -> ExpandedRetrievalContext: ...
 
 
 class AnswerGenerator(Protocol):
