@@ -91,10 +91,6 @@ class RetrievalRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def release_read_transaction(self) -> None:
-        """Release database resources before awaiting a slow external reranker."""
-        await self._session.rollback()
-
     async def inspect_scope(
         self,
         *,

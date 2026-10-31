@@ -85,9 +85,7 @@ class RetrievalService:
         scope = await self._inspect_scope(request)
         self._validate_scope(scope)
         if scope.active_document_count == 0:
-            candidates = self._empty_candidates(normalized_query, request.top_k)
-            await self._repository.release_read_transaction()
-            return candidates
+            return self._empty_candidates(normalized_query, request.top_k)
 
         vectors = await embed_in_batches(
             self._embedding_client,
@@ -122,7 +120,6 @@ class RetrievalService:
             roots=tuple(sorted(root_ids, key=lambda item: (str(item[0]), str(item[1])))),
             max_sections=self._settings.retrieval_outline_max_sections,
         )
-        await self._repository.release_read_transaction()
         get_client().update_current_span(
             metadata={
                 "retrieval_vector_candidate_count": len(records),

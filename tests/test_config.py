@@ -59,6 +59,7 @@ def test_secure_cookies_are_environment_aware() -> None:
         object_store_backend="s3",
         s3_bucket="private-test-bucket",
         allowed_origins=["https://app.example.test"],
+        reranker_base_url="https://reranker.example.test",
     )
 
     assert local.secure_cookies is False
