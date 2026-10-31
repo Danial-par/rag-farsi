@@ -426,7 +426,11 @@ class RetrievalRepository:
                 ),
             )
             .where(or_(*section_filters))
-            .group_by(authorized.c.document_version_id, path_expression)
+            .group_by(
+                authorized.c.document_version_id,
+                authorized.c.document_title,
+                path_expression,
+            )
             .order_by(authorized.c.document_version_id, func.min(Chunk.ordinal))
             .limit(max_sections * 2 + 1)
         )
